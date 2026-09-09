@@ -8,10 +8,20 @@ const nextConfig = {
   // vez de configurar "por via das dúvidas".
   output: 'standalone', // imagem Docker enxuta — ver Dockerfile (deploy alternativo/self-host; a Vercel não usa isso)
   experimental: {
+    // ffmpeg-static/ffprobe-static resolvem o caminho do próprio binário
+    // em runtime via `__dirname` + process.platform/arch. Sem isto, o
+    // Next.js empacota o pacote inteiro dentro de um chunk webpack
+    // compartilhado — o que muda o `__dirname` efetivo em runtime e faz
+    // o binário ser procurado num caminho que não existe (confirmado em
+    // produção: "spawn .next/server/chunks/bin/linux/x64/ffprobe ENOENT").
+    // Mantendo os dois pacotes como "external", o require nativo preserva
+    // o `__dirname` real (dentro de node_modules/), que é o caminho para
+    // onde outputFileTracingIncludes (abaixo) de fato copia o binário.
+    serverComponentsExternalPackages: ['ffmpeg-static', 'ffprobe-static'],
     // A Vercel empacota cada rota de API rastreando os módulos que ela
-    // importa — mas ffmpeg-static/ffprobe-static resolvem o caminho do
-    // binário dinamicamente (process.platform), então o rastreamento
-    // automático não os encontra. Duas rotas usam o MediaProcessor:
+    // importa — mas o rastreamento automático não segue a resolução
+    // dinâmica de caminho acima, então os arquivos binários em si
+    // precisam ser incluídos à mão. Duas rotas usam o MediaProcessor:
     // /api/inngest (transcodeMediaFunction, precisa de ffmpeg+ffprobe) e
     // .../upload/[mediaId]/complete (só detecta o codec logo após o
     // upload, precisa só do ffprobe) — sem isso, o probe falha em
