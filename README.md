@@ -199,6 +199,7 @@ Um único deploy — o app Next.js na Vercel. Não existe mais um segundo proces
 2. **Conecte a integração Vercel↔Inngest** (recomendado, configura as chaves automaticamente) ou gere `INNGEST_EVENT_KEY`/`INNGEST_SIGNING_KEY` manualmente no [dashboard do Inngest](https://app.inngest.com) e cole como variáveis de ambiente.
 3. Deploy normal do app (`npm run build`, ou direto pela integração Git da Vercel).
 4. Rode `npx prisma migrate deploy` (não `migrate dev`) como parte do processo de deploy, antes de trocar o tráfego para a nova versão.
+5. **Sincronize o Inngest depois do deploy**: `curl -X PUT https://SEU-DOMINIO/api/inngest` (registra as funções atuais no Inngest Cloud). Confirmado em produção que isso não acontece sozinho de forma confiável só por ter a integração conectada — sem sincronizar, os eventos são aceitos mas nenhuma função roda, e toda publicação fica presa em `QUEUED`/`PROCESSING` para sempre. Verifique também pelo [dashboard do Inngest](https://app.inngest.com) (Apps → seu app → Sync) se o app aparece como sincronizado.
 
 ### Self-host alternativo (sem Vercel)
 
@@ -243,6 +244,7 @@ Em produção, troque `http://localhost:3000` pelo domínio HTTPS real e cadastr
 - [ ] HTTPS válido em todas as URLs de callback
 - [ ] Bucket de storage com política de acesso mínima necessária (URLs assinadas, não bucket público permanente)
 - [ ] Fluid Compute habilitado no projeto Vercel e `INNGEST_EVENT_KEY`/`INNGEST_SIGNING_KEY` configurados (integração Vercel↔Inngest ou manual)
+- [ ] Inngest sincronizado depois do deploy (`curl -X PUT https://SEU-DOMINIO/api/inngest`) — verificado a cada deploy, não só na primeira vez (ver seção 12)
 - [ ] Alertas configurados no dashboard do Inngest para funções falhando repetidamente
 - [ ] Rate limiting e CSRF revisados nas rotas expostas
 - [ ] Rotina de expurgo de mídia temporária (`MEDIA_RETENTION_HOURS`) — ainda não implementada, ver seção 5
