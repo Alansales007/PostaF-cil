@@ -1,0 +1,17 @@
+{
+  "name": "PostaFácil",
+  "short_name": "PostaFácil",
+  "description": "Publique uma vez. Conecte o seu mundo.",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#6631ff",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,245 @@
+// PostaFácil — esquema de banco de dados
+// PostgreSQL (compatível com Supabase Postgres)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------------------------------
+// Enums
+// ------------------------------------------------------------------
+
+enum Provider {
+  INSTAGRAM
+  FACEBOOK
+  TIKTOK
+  KWAI
+}
+
+enum SocialAccountStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+  PENDING // aguardando autorização da plataforma (ex.: Kwai)
+}
+
+enum MediaFileStatus {
+  UPLOADING
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+  DELETED
+}
+
+enum PublicationStatus {
+  DRAFT
+  UPLOADING
+  QUEUED
+  PROCESSING
+  PUBLISHING
+  PUBLISHED
+  FAILED
+  PARTIAL_SUCCESS
+  CANCELLED
+}
+
+enum PublicationTargetStatus {
+  QUEUED
+  PROCESSING
+  PUBLISHING
+  PUBLISHED
+  FAILED
+  CANCELLED
+}
+
+// ------------------------------------------------------------------
+// Usuários & autenticação do app (independente do OAuth das redes)
+// ------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  name         String?
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  socialAccounts SocialAccount[]
+  mediaFiles     MediaFile[]
+  publications   Publication[]
+  oauthStates    OAuthState[]
+  auditLogs      AuditLog[]
+
+  @@map("users")
+}
+
+// ------------------------------------------------------------------
+// Contas sociais conectadas
+// ------------------------------------------------------------------
+
+model SocialAccount {
+  id                    String              @id @default(cuid())
+  userId                String
+  user                  User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider              Provider
+  providerAccountId     String
+  username              String?
+  displayName           String?
+  avatarUrl             String?
+  encryptedAccessToken  String
+  encryptedRefreshToken String?
+  tokenExpiresAt        DateTime?
+  scopes                String[]
+  status                SocialAccountStatus @default(ACTIVE)
+  metadata              Json?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  publicationTargets PublicationTarget[]
+
+  @@unique([userId, provider, providerAccountId])
+  @@index([userId])
+  @@map("social_accounts")
+}
+
+// ------------------------------------------------------------------
+// Arquivos de mídia (armazenamento temporário)
+// ------------------------------------------------------------------
+
+model MediaFile {
+  id               String           @id @default(cuid())
+  userId           String
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  originalFilename String
+  storagePath      String
+  storageProvider  String           @default("s3")
+  mimeType         String
+  filesize         BigInt
+  duration         Float?
+  width            Int?
+  height           Int?
+  checksum         String?
+  status           MediaFileStatus  @default(UPLOADING)
+  uploadSessionId  String?          @unique
+  /// Detalhes técnicos do upload em chunks (partSize, totalParts) e
+  /// eventuais metadados adicionais — não faz parte do domínio de negócio,
+  /// fica em JSON para não poluir o schema com colunas de implementação.
+  metadata         Json?
+  deleteAfterAt    DateTime?
+  deletedAt        DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  publications Publication[]
+
+  @@index([userId])
+  @@map("media_files")
+}
+
+// ------------------------------------------------------------------
+// Publicações
+// ------------------------------------------------------------------
+
+model Publication {
+  id                 String             @id @default(cuid())
+  userId             String
+  user               User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mediaId            String
+  media              MediaFile          @relation(fields: [mediaId], references: [id])
+  title              String?
+  generalCaption     String?
+  useSameCaption     Boolean            @default(true)
+  status             PublicationStatus  @default(DRAFT)
+  scheduledAt        DateTime?
+  timezone           String?
+  deleteAfterPublish Boolean            @default(false)
+  correlationId      String             @unique
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  targets PublicationTarget[]
+
+  @@index([userId])
+  @@index([status])
+  @@map("publications")
+}
+
+// ------------------------------------------------------------------
+// Alvo de publicação por rede social (idempotente por publicação+provider)
+// ------------------------------------------------------------------
+
+model PublicationTarget {
+  id                  String                   @id @default(cuid())
+  publicationId       String
+  publication         Publication              @relation(fields: [publicationId], references: [id], onDelete: Cascade)
+  socialAccountId     String
+  socialAccount       SocialAccount            @relation(fields: [socialAccountId], references: [id])
+  provider            Provider
+  customCaption       String?
+  status              PublicationTargetStatus  @default(QUEUED)
+  providerContainerId String?
+  providerPublishId   String?
+  providerPostId      String?
+  providerUrl         String?
+  attemptCount        Int                      @default(0)
+  maxAttempts         Int                      @default(5)
+  lastAttemptAt       DateTime?
+  nextRetryAt         DateTime?
+  errorCode           String?
+  errorMessage         String?
+  statusHistory       Json?
+  publishedAt         DateTime?
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+
+  @@unique([publicationId, provider])
+  @@index([status])
+  @@map("publication_targets")
+}
+
+// ------------------------------------------------------------------
+// Estado de OAuth (CSRF / PKCE)
+// ------------------------------------------------------------------
+
+model OAuthState {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     Provider
+  state        String    @unique
+  codeVerifier String?
+  redirectUri  String
+  usedAt       DateTime?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+
+  @@index([state])
+  @@map("oauth_states")
+}
+
+// ------------------------------------------------------------------
+// Auditoria (nunca conter segredos/tokens completos)
+// ------------------------------------------------------------------
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action        String
+  entityType    String?
+  entityId      String?
+  correlationId String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@index([correlationId])
+  @@map("audit_logs")
+}

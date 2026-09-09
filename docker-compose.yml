@@ -1,0 +1,71 @@
+# Stack completa para rodar o PostaFácil localmente com Postgres e Redis de
+# verdade — inclusive para validar a fila/worker de ponta a ponta, algo que
+# não é possível sem essa infraestrutura. Não é uma receita de produção
+# pronta (sem TLS, sem backups, sem múltiplas réplicas) — é o ambiente de
+# desenvolvimento/homologação mais próximo do real.
+#
+# Uso:
+#   cp .env.example .env   # preencha DATABASE_URL/REDIS_URL como abaixo
+#   docker compose up -d postgres redis
+#   docker compose run --rm app npx prisma migrate deploy
+#   docker compose up -d app worker
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postafacil
+      POSTGRES_PASSWORD: postafacil
+      POSTGRES_DB: postafacil
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postafacil']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postafacil:postafacil@postgres:5432/postafacil?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://postafacil:postafacil@postgres:5432/postafacil?schema=public
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

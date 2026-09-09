@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+build/
+
+# env
+.env
+.env*.local
+
+# logs
+*.log
+npm-debug.log*
+
+# testing
+coverage/
+
+# misc
+.DS_Store
+Thumbs.db
+*.pem
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# prisma
+prisma/dev.db
+prisma/dev.db-journal
+
+# local temp uploads
+tmp/
+.data/
+.claude/
