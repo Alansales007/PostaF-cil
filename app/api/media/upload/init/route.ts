@@ -69,7 +69,17 @@ export async function POST(req: NextRequest) {
   const ext = path.extname(filename) || '.mp4';
   const key = `users/${session.user.id}/media/${mediaFile.id}/original${ext}`;
 
-  const { uploadId } = await storage.createMultipartUpload({ key, contentType: mimeType });
+  let uploadId: string;
+  try {
+    ({ uploadId } = await storage.createMultipartUpload({ key, contentType: mimeType }));
+  } catch (err) {
+    logger.error({ err, mediaId: mediaFile.id, storageProvider: storage.providerName }, 'Falha ao iniciar upload no storage');
+    await db.mediaFile.update({ where: { id: mediaFile.id }, data: { status: 'FAILED' } });
+    return NextResponse.json(
+      { error: 'Não foi possível iniciar o upload — o armazenamento de mídia não está configurado corretamente.' },
+      { status: 502 },
+    );
+  }
 
   await db.mediaFile.update({
     where: { id: mediaFile.id },
