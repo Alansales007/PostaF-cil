@@ -45,3 +45,5 @@ tmp/
 # (Prisma Postgres, Upstash) — documentação de referência, não é código do app
 .agents/
 skills-lock.json
+
+.env*

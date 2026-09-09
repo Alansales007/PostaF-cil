@@ -11,10 +11,16 @@ const nextConfig = {
     // A Vercel empacota cada rota de API rastreando os módulos que ela
     // importa — mas ffmpeg-static/ffprobe-static resolvem o caminho do
     // binário dinamicamente (process.platform), então o rastreamento
-    // automático não os encontra. /api/inngest roda o MediaProcessor
-    // (transcodeMediaFunction), então precisa dos binários incluídos à mão.
+    // automático não os encontra. Duas rotas usam o MediaProcessor:
+    // /api/inngest (transcodeMediaFunction, precisa de ffmpeg+ffprobe) e
+    // .../upload/[mediaId]/complete (só detecta o codec logo após o
+    // upload, precisa só do ffprobe) — sem isso, o probe falha em
+    // silêncio (é tratado como erro recuperável) e todo vídeo acaba
+    // caindo na transcodificação por segurança, que também falharia pelo
+    // mesmo motivo.
     outputFileTracingIncludes: {
       '/api/inngest': ['./node_modules/ffmpeg-static/**/*', './node_modules/ffprobe-static/**/*'],
+      '/api/media/upload/[mediaId]/complete': ['./node_modules/ffprobe-static/**/*'],
     },
   },
   async headers() {
