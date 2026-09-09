@@ -11,7 +11,7 @@ Painel web para publicar vídeos simultaneamente no Instagram, Facebook, TikTok 
 1. [Requisitos](#1-requisitos)
 2. [Instalação](#2-instalação)
 3. [Banco de dados](#3-banco-de-dados)
-4. [Redis](#4-redis)
+4. [Fila (Inngest)](#4-fila-inngest)
 5. [Storage](#5-storage)
 6. [Configuração — Meta (Instagram)](#6-configuração--meta-instagram)
 7. [Configuração — Meta (Facebook)](#7-configuração--meta-facebook)
@@ -33,9 +33,10 @@ Painel web para publicar vídeos simultaneamente no Instagram, Facebook, TikTok 
 
 - Node.js 20+
 - PostgreSQL 14+ (local, Docker ou Supabase)
-- Redis 6+ (fila BullMQ)
-- FFmpeg instalado no servidor do worker (a partir da ETAPA 2/7 — não necessário para a ETAPA 1)
+- Uma conta [Inngest](https://www.inngest.com) (free tier) para produção — em desenvolvimento, o Inngest Dev Server local (`npm run inngest:dev`) não exige conta nem credenciais
 - Uma conta de storage compatível com S3 (AWS S3, Cloudflare R2 ou Supabase Storage) — a partir da ETAPA 2
+
+FFmpeg não precisa estar instalado no servidor — `ffmpeg-static`/`ffprobe-static` trazem o binário embutido no próprio pacote npm.
 
 ## 2. Instalação
 
@@ -67,26 +68,28 @@ npm run db:studio
 
 Com Supabase: use a *Connection string* (modo "Session" ou "Transaction pooling", conforme o plano) do painel do projeto em `DATABASE_URL`.
 
-## 4. Redis
+## 4. Fila (Inngest)
 
-Necessário para a fila BullMQ e para o pub/sub de eventos em tempo real. Localmente:
+Sem processo permanente: a fila roda como funções serverless do [Inngest](https://www.inngest.com/docs), chamadas via `/api/inngest`. Decidido assim de propósito — com ~20 publicações/dia, manter um worker ligado 24h (a arquitetura original deste projeto) custa dinheiro à toa. Ver a decisão completa em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#1-análise-dos-requisitos-resumo).
+
+**Em desenvolvimento**, rode o Inngest Dev Server em paralelo ao app — ele descobre `/api/inngest` sozinho, sem precisar de conta nem credenciais:
 
 ```bash
-docker run -p 6379:6379 redis:7-alpine
+npm run inngest:dev   # abre um painel em http://localhost:8288
 ```
 
-Defina `REDIS_URL=redis://localhost:6379`.
+**Em produção**, conecte a [integração Vercel↔Inngest](https://www.inngest.com/docs/deploy/vercel) (recomendado — configura `INNGEST_EVENT_KEY`/`INNGEST_SIGNING_KEY` automaticamente) ou gere essas duas chaves manualmente no [dashboard do Inngest](https://app.inngest.com) e cole como variáveis de ambiente na Vercel.
 
 ### 4.1 Fila, retries e tempo real
 
-Ao clicar em **Publicar**, a rota `POST /api/publications` cria uma `Publication` e um `PublicationTarget` por rede selecionada, e enfileira cada um independentemente ([lib/queue/publish-queue.ts](lib/queue/publish-queue.ts)) — o processo `npm run worker` ([workers/publishWorker.ts](workers/publishWorker.ts)) é quem de fato chama cada `SocialProvider`.
+Ao clicar em **Publicar**, a rota `POST /api/publications` cria uma `Publication` e um `PublicationTarget` por rede selecionada, e dispara um evento por alvo ([lib/inngest/events.ts](lib/inngest/events.ts)) — a função [publish-target](lib/inngest/functions/publish-target.ts) é quem de fato chama cada `SocialProvider`.
 
-- **Idempotência**: o worker nunca chama `publishVideo()` duas vezes para o mesmo alvo — uma vez que existe um `providerContainerId`, só faz polling (`getPublishStatus`). Enquanto um alvo está em andamento, o próprio job se reagenda nele mesmo (`job.moveToDelayed`, o padrão oficial do BullMQ para jobs de longa duração) em vez de criar um job novo.
-- **Retry**: erros são classificados em [lib/queue/retry-policy.ts](lib/queue/retry-policy.ts) — permanentes (token expirado, mídia recusada, permissão faltando) falham na hora e pedem reconexão; temporários (rate limit, erro de rede) tentam de novo com backoff exponencial + jitter, respeitando `Retry-After`/`retryAfterSeconds` quando a plataforma informa, até `maxAttempts` (padrão 5) por alvo.
+- **Idempotência**: a função nunca chama `publishVideo()` duas vezes para o mesmo alvo — uma vez que existe um `providerContainerId`, só faz polling (`getPublishStatus`). Enquanto um alvo está em andamento, a própria função Inngest se "pausa" com `step.sleep()` (sem manter nenhum processo rodando durante a espera) em vez de criar uma execução nova.
+- **Retry**: erros são classificados em [lib/inngest/retry-policy.ts](lib/inngest/retry-policy.ts) — permanentes (token expirado, mídia recusada, permissão faltando) falham na hora e pedem reconexão; temporários (rate limit, erro de rede) tentam de novo com backoff exponencial + jitter, respeitando `Retry-After`/`retryAfterSeconds` quando a plataforma informa, até `maxAttempts` (padrão 5) por alvo.
 - **Se uma rede falha, as outras não são afetadas** — cada `PublicationTarget` é uma linha independente; "Tentar novamente" ([POST /api/publications/[id]/retry](app/api/publications/[id]/retry/route.ts)) só reprocessa a rede que falhou.
-- **Tempo real**: o worker publica cada mudança de status no Redis ([lib/realtime/publish-events.ts](lib/realtime/publish-events.ts)); a rota [/api/events](app/api/events/route.ts) expõe isso como Server-Sent Events, consumido pelo hook [usePublicationEvents](hooks/use-publication-events.ts) — funciona nativamente no Safari do iPhone, sem biblioteca extra.
+- **Tempo real**: sem Redis/SSE — a tela de detalhes da publicação faz *polling* de `GET /api/publications/[id]` a cada 3 segundos enquanto houver algum alvo não-terminal ([hooks/use-publication-status-polling.ts](hooks/use-publication-status-polling.ts)), e para sozinho ao concluir. Simples e suficiente nesse volume (publicar já leva minutos); o hook foi desenhado como ponto único de extensão caso valha a pena voltar para um push instantâneo (SSE/WebSocket) no futuro.
 - **Detalhes técnicos**: cada `PublicationTarget` guarda um histórico (`statusHistory`) com timestamp e mensagem de cada transição, exibido na tela de detalhes da publicação.
-- **Agendamento**: "Publicar agora" ou "Agendar" usam o mesmo mecanismo — o delay do job BullMQ é calculado a partir de `scheduledAt` ([lib/publication/schedule.ts](lib/publication/schedule.ts)), então a publicação acontece no horário certo mesmo com o navegador fechado, sem depender de nenhum cron externo. O fuso horário exibido é o detectado no navegador (`Intl.DateTimeFormat().resolvedOptions().timeZone`) — o PostaFácil não oferece escolher um fuso diferente do seu ainda, para evitar bugs de conversão sem uma biblioteca de timezone dedicada. Cancelar um agendamento (antes de qualquer rede começar a processar) remove o job ainda em espera da fila.
+- **Agendamento**: "Publicar agora" ou "Agendar" usam o mesmo mecanismo — `step.sleepUntil()` espera até `scheduledAt` ([lib/publication/schedule.ts](lib/publication/schedule.ts)) antes de começar a publicar, então a publicação acontece no horário certo mesmo com o navegador fechado, sem depender de nenhum cron externo. O fuso horário exibido é o detectado no navegador (`Intl.DateTimeFormat().resolvedOptions().timeZone`) — o PostaFácil não oferece escolher um fuso diferente do seu ainda, para evitar bugs de conversão sem uma biblioteca de timezone dedicada. Cancelar um agendamento (antes de qualquer rede começar a processar) envia um evento de cancelamento que interrompe a função ainda esperando (`cancelOn`, ver `publish-target.ts`).
 
 ## 5. Storage
 
@@ -110,7 +113,7 @@ A camada `StorageService` ([services/storage](services/storage)) fala com qualqu
 ]
 ```
 
-O bucket guarda os vídeos **temporariamente**; a exclusão automática (24h configurável via `MEDIA_RETENTION_HOURS`) só ocorre depois que todas as plataformas selecionadas processaram o vídeo (implementado no `cleanupWorker`, ETAPA 7).
+O bucket guarda os vídeos **temporariamente** — a janela de retenção é configurável via `MEDIA_RETENTION_HOURS` (padrão 24h). A rotina de expurgo automático ainda não está implementada (fica para uma próxima iteração — ver checklist na seção 15).
 
 ### 5.1 Upload de vídeo
 
@@ -182,39 +185,38 @@ Destaques de segurança:
 ## 11. Execução local
 
 ```bash
-npm run dev        # app Next.js (frontend + API routes)
-npm run worker      # processo worker (BullMQ) — a partir da ETAPA 7
+npm run dev          # app Next.js (frontend + API routes)
+npm run inngest:dev   # Inngest Dev Server — descobre /api/inngest sozinho
 ```
 
-São dois processos porque transcodificação de vídeo e polling de status das redes sociais não podem rodar dentro do tempo de vida de uma requisição HTTP.
+Dois comandos, mas **um único processo de produção** — o Inngest Dev Server é só uma ferramenta de desenvolvimento (painel + roteamento local dos eventos); em produção não existe equivalente rodando por conta própria, é tudo Vercel + Inngest Cloud (ver seção 12).
 
 ## 12. Deploy
 
-O sistema é sempre **dois processos** — nunca dá pra rodar o worker dentro do mesmo host serverless do app (ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+Um único deploy — o app Next.js na Vercel. Não existe mais um segundo processo/worker para hospedar separadamente (essa era a arquitetura anterior deste projeto; ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para o porquê da mudança).
 
-### Opção A — Vercel (app) + container separado (worker)
+1. **Habilite Fluid Compute** no projeto Vercel (Project Settings → Functions) — necessário para o `maxDuration` de até 300s usado por `/api/inngest` (polling de status e transcodificação de vídeo rodam ali). Disponível de graça no plano Hobby.
+2. **Conecte a integração Vercel↔Inngest** (recomendado, configura as chaves automaticamente) ou gere `INNGEST_EVENT_KEY`/`INNGEST_SIGNING_KEY` manualmente no [dashboard do Inngest](https://app.inngest.com) e cole como variáveis de ambiente.
+3. Deploy normal do app (`npm run build`, ou direto pela integração Git da Vercel).
+4. Rode `npx prisma migrate deploy` (não `migrate dev`) como parte do processo de deploy, antes de trocar o tráfego para a nova versão.
 
-- **App**: deploy normal no Vercel (ou qualquer host com suporte a Next.js 14). `npm run build` já usa `output: 'standalone'`.
-- **Worker**: Vercel não roda processos de longa duração — suba `Dockerfile.worker` em Fly.io, Railway, Render ou uma VM comum, apontando para o mesmo Postgres/Redis/storage do app.
-- Rode `npx prisma migrate deploy` (não `migrate dev`) como parte do processo de deploy do app, antes de trocar o tráfego para a nova versão.
+### Self-host alternativo (sem Vercel)
 
-### Opção B — Docker (app + worker no mesmo lugar)
-
-Este repositório já traz [Dockerfile](Dockerfile) (app, multi-stage, imagem final rodando como usuário não-root), [Dockerfile.worker](Dockerfile.worker) e [docker-compose.yml](docker-compose.yml) (stack completa com Postgres e Redis reais — útil até em desenvolvimento, para validar a fila de ponta a ponta):
+Este repositório também traz [Dockerfile](Dockerfile) (app, multi-stage, imagem final rodando como usuário não-root) e [docker-compose.yml](docker-compose.yml) (stack local com Postgres real — útil até em desenvolvimento). Nesse caminho, o Inngest continua sendo o mesmo serviço externo (Inngest Cloud ou self-hosted, fora do escopo deste projeto) chamando `/api/inngest` por HTTP — nenhum processo adicional a rodar.
 
 ```bash
 cp .env.example .env   # preencha os valores reais
-docker compose up -d postgres redis
+docker compose up -d postgres
 docker compose run --rm app npx prisma migrate deploy
-docker compose up -d app worker
+docker compose up -d app
 ```
 
-Em produção, aponte `DATABASE_URL`/`REDIS_URL`/`STORAGE_*` para serviços gerenciados (RDS/Supabase, ElastiCache/Upstash, S3/R2) em vez dos containers `postgres`/`redis` do compose, que são só para desenvolvimento/homologação.
+Em produção, aponte `DATABASE_URL`/`STORAGE_*` para serviços gerenciados (RDS/Supabase, S3/R2) em vez do container `postgres` do compose, que é só para desenvolvimento/homologação.
 
 ### Observabilidade do deploy
 
-- `GET /api/health` — liveness/readiness probe (checa Postgres e Redis), sem autenticação, pronto para load balancer/orquestrador.
-- [.github/workflows/ci.yml](.github/workflows/ci.yml) — roda `typecheck`, `lint`, `test` e `build` a cada push/PR contra um Postgres e Redis reais (o `db:deploy` das migrations é exercitado de verdade aqui, diferente do ambiente local de desenvolvimento).
+- `GET /api/health` — liveness/readiness probe (checa Postgres), sem autenticação, pronto para load balancer/orquestrador.
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — roda `typecheck`, `lint`, `test` e `build` a cada push/PR contra um Postgres real (o `db:deploy` das migrations é exercitado de verdade aqui, diferente do ambiente local de desenvolvimento).
 
 ## 13. Configuração OAuth (visão geral)
 
@@ -240,15 +242,15 @@ Em produção, troque `http://localhost:3000` pelo domínio HTTPS real e cadastr
 - [ ] Domínio verificado no TikTok (se usar `PULL_FROM_URL`)
 - [ ] HTTPS válido em todas as URLs de callback
 - [ ] Bucket de storage com política de acesso mínima necessária (URLs assinadas, não bucket público permanente)
-- [ ] Worker rodando como processo de longa duração monitorado (restart automático em caso de crash)
-- [ ] Alertas configurados para filas com jobs falhando repetidamente
+- [ ] Fluid Compute habilitado no projeto Vercel e `INNGEST_EVENT_KEY`/`INNGEST_SIGNING_KEY` configurados (integração Vercel↔Inngest ou manual)
+- [ ] Alertas configurados no dashboard do Inngest para funções falhando repetidamente
 - [ ] Rate limiting e CSRF revisados nas rotas expostas
-- [ ] Rotina de expurgo de mídia temporária (`MEDIA_RETENTION_HOURS`) testada
+- [ ] Rotina de expurgo de mídia temporária (`MEDIA_RETENTION_HOURS`) — ainda não implementada, ver seção 5
 - [ ] Logs validados para garantir que nenhum token completo é gravado
 - [ ] `Content-Security-Policy` avaliado e testado no navegador (não incluído por padrão — ver seção 18)
-- [ ] Rate limiting migrado de memória para Redis se rodar mais de uma instância do app
+- [ ] Rate limiting migrado de memória para um armazenamento compartilhado se rodar mais de uma instância do app
 - [ ] Avaliar upgrade do Next.js para a versão 15/16 (`npm audit`) — a 14.2.35 já corrige o bypass de autorização no middleware, mas algumas advisories restantes só têm correção completa em versões major
-- [ ] Testar a transcodificação (`transcodeWorker`) rodando de verdade no container Linux de produção — só foi validada nativamente no Windows neste ambiente; os Dockerfiles usam `node:20-slim` (não `alpine`) de propósito, por causa da compatibilidade do binário do ffmpeg-static com glibc
+- [ ] Confirmar que a transcodificação de vídeos maiores cabe no `maxDuration` da função Vercel em produção (ver risco documentado em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#8-limitações-atuais-conhecidas)) — só foi validada localmente nesta sessão
 
 ## 16. Modo mock (desenvolvimento sem credenciais)
 
@@ -286,21 +288,21 @@ Revisão manual do código (sem git configurado neste ambiente, então não deu 
 ## Estrutura do projeto
 
 ```
-/app            → rotas Next.js (App Router): páginas + API routes
+/app            → rotas Next.js (App Router): páginas + API routes, incl. /api/inngest
 /components     → componentes React (ui, dashboard, auth, theme, upload)
-/hooks          → hooks React (ex.: useChunkedUpload)
+/hooks          → hooks React (ex.: useChunkedUpload, use-publication-status-polling)
 /lib            → db, auth, crypto, logger, env, rate-limit, utils, signed-token,
-                   redis, upload/*, oauth/*, social/*, queue/* (fila + retry),
-                   publication/* (status/histórico), realtime/* (SSE)
+                   upload/*, oauth/*, social/*, publication/* (status/histórico)
+/lib/inngest    → client, events (envio), retry-policy, poll-decision,
+                   functions/publish-target, functions/transcode-media
 /services       → storage/ (S3 + local), publicationService, tokenService, mediaProcessor (FFmpeg real)
 /providers      → contrato SocialProvider + instagram/ facebook/ tiktok/ kwai/ mock/
-/workers        → processo BullMQ separado — publishWorker e transcodeWorker reais; cleanup ainda placeholder
 /prisma         → schema.prisma + migrations
 /types          → tipos compartilhados
 /tests          → testes unitários e de integração
 /docs           → documentação de arquitetura
-/.github/workflows → CI (typecheck, lint, test, build contra Postgres/Redis reais)
-Dockerfile, Dockerfile.worker, docker-compose.yml → deploy (ver seção 12)
+/.github/workflows → CI (typecheck, lint, test, build contra Postgres real)
+Dockerfile, docker-compose.yml → self-host opcional (ver seção 12)
 ```
 
 Veja [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para a análise completa de arquitetura, fluxos OAuth por plataforma, credenciais necessárias e limitações conhecidas de cada API.

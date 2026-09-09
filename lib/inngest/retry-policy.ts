@@ -1,8 +1,8 @@
 /**
  * Política de retry — lógica pura, sem I/O, para ser testável sem precisar
- * de Redis/BullMQ reais. O worker (workers/publishWorker.ts) só chama
- * essas funções para decidir o que fazer; quem manda mensagem de rede é
- * sempre o SocialProvider.
+ * de infraestrutura real. As funções Inngest (lib/inngest/functions/*) só
+ * chamam essas funções para decidir o que fazer; quem manda mensagem de
+ * rede é sempre o SocialProvider.
  */
 
 /** Códigos de erro que nenhuma quantidade de retry resolve — precisam de ação do usuário (reconectar, trocar o vídeo). */

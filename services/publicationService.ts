@@ -1,8 +1,7 @@
 import type { PublicationStatus } from '@prisma/client';
 import { db } from '@/lib/db';
 import { generateCorrelationId, logger } from '@/lib/logger';
-import { enqueuePublishTarget, removeQueuedJob } from '@/lib/queue/publish-queue';
-import { enqueueTranscode } from '@/lib/queue/transcode-queue';
+import { enqueuePublishTarget, cancelPublishTarget, enqueueTranscode } from '@/lib/inngest/events';
 import { appendHistoryEntry } from '@/lib/publication/history';
 import { computeScheduleDelayMs, isCancellable, InvalidScheduleError } from '@/lib/publication/schedule';
 import { needsTranscodeForMediaFile } from '@/services/mediaProcessor';
@@ -28,7 +27,7 @@ export interface CreatePublicationInput {
 /**
  * Cria a Publication + um PublicationTarget por rede selecionada e
  * enfileira cada um independentemente — cada rede é processada e pode
- * falhar/repetir sem afetar as demais (ver workers/publishWorker.ts).
+ * falhar/repetir sem afetar as demais (ver lib/inngest/functions/publish-target.ts).
  */
 export async function createPublication(userId: string, input: CreatePublicationInput) {
   if (input.providers.length === 0) {
@@ -58,9 +57,11 @@ export async function createPublication(userId: string, input: CreatePublication
     throw new PublicationValidationError('Data de agendamento inválida.');
   }
 
-  let delayMs: number;
   try {
-    delayMs = computeScheduleDelayMs(scheduledAt);
+    // Só valida o lead time mínimo aqui — o próprio Inngest calcula o
+    // atraso a partir de `scheduledAt` (step.sleepUntil), então o valor de
+    // retorno não é mais usado (ver enqueuePublishTarget em lib/inngest/events.ts).
+    computeScheduleDelayMs(scheduledAt);
   } catch (err) {
     if (err instanceof InvalidScheduleError) throw new PublicationValidationError(err.message);
     throw err;
@@ -107,14 +108,15 @@ export async function createPublication(userId: string, input: CreatePublication
 
   // Se o vídeo já é MP4/H.264/AAC (ou já foi transcodificado antes por
   // outra publicação), publica direto. Senão, prepara o vídeo primeiro —
-  // o transcodeWorker é quem libera os alvos desta publicação (e de
-  // qualquer outra publicação que esteja esperando o mesmo vídeo) assim
-  // que terminar. Nunca altera o arquivo original.
+  // a função transcode-media (lib/inngest/functions/transcode-media.ts) é
+  // quem libera os alvos desta publicação (e de qualquer outra publicação
+  // que esteja esperando o mesmo vídeo) assim que terminar. Nunca altera
+  // o arquivo original.
   if (media.status !== 'READY' && needsTranscodeForMediaFile(media.mimeType, media.videoCodec, media.audioCodec)) {
     await db.mediaFile.update({ where: { id: media.id }, data: { status: 'PROCESSING' } });
     await enqueueTranscode(media.id);
   } else {
-    await Promise.all(publication.targets.map((target) => enqueuePublishTarget(target.id, { delayMs })));
+    await Promise.all(publication.targets.map((target) => enqueuePublishTarget(target.id, { scheduledAt })));
   }
 
   await db.auditLog.create({
@@ -140,12 +142,7 @@ export async function enqueuePendingTargetsForMedia(mediaId: string): Promise<vo
   });
 
   await Promise.all(
-    targets.map((target) => {
-      const delayMs = target.publication.scheduledAt
-        ? Math.max(0, target.publication.scheduledAt.getTime() - Date.now())
-        : 0;
-      return enqueuePublishTarget(target.id, { delayMs });
-    }),
+    targets.map((target) => enqueuePublishTarget(target.id, { scheduledAt: target.publication.scheduledAt })),
   );
 }
 
@@ -255,7 +252,7 @@ export async function retryPublicationTarget(userId: string, publicationId: stri
     },
   });
 
-  await enqueuePublishTarget(target.id, { jobId: `${target.id}:retry:${Date.now()}` });
+  await enqueuePublishTarget(target.id, { dedupeId: `${target.id}:retry:${Date.now()}` });
 
   await db.auditLog.create({
     data: { userId, action: 'publication_target.retry', entityType: 'PublicationTarget', entityId: target.id, correlationId: publication.correlationId },
@@ -266,9 +263,10 @@ export async function retryPublicationTarget(userId: string, publicationId: stri
 
 /**
  * Cancela uma publicação agendada antes que qualquer alvo comece a ser
- * processado — remove o job ainda esperando na fila (BullMQ) de cada
- * alvo. Depois que uma rede já começou a publicar, não é mais possível
- * cancelar as demais isoladamente por aqui (use retry por rede se alguma falhar).
+ * processado — envia um evento de cancelamento (Inngest `cancelOn`) para a
+ * função ainda dormindo até o horário agendado de cada alvo. Depois que
+ * uma rede já começou a publicar, não é mais possível cancelar as demais
+ * isoladamente por aqui (use retry por rede se alguma falhar).
  */
 export async function cancelScheduledPublication(userId: string, publicationId: string) {
   const publication = await db.publication.findUnique({ where: { id: publicationId }, include: { targets: true } });
@@ -279,7 +277,7 @@ export async function cancelScheduledPublication(userId: string, publicationId: 
     throw new PublicationValidationError('Esta publicação já começou a ser processada e não pode mais ser cancelada.');
   }
 
-  await Promise.all(publication.targets.map((t) => removeQueuedJob(t.id)));
+  await Promise.all(publication.targets.map((t) => cancelPublishTarget(t.id)));
 
   await db.$transaction([
     db.publicationTarget.updateMany({ where: { publicationId }, data: { status: 'CANCELLED' } }),

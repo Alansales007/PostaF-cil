@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { CalendarClock } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { PublicationTargetRow, type TargetViewModel } from '@/components/publication/publication-target-row';
-import { usePublicationEvents } from '@/hooks/use-publication-events';
+import { usePublicationStatusPolling } from '@/hooks/use-publication-status-polling';
 
 interface Props {
   publicationId: string;
@@ -25,21 +25,7 @@ export function PublicationDetail({ publicationId, caption, createdAt, scheduled
   const isFutureSchedule = scheduledAt ? new Date(scheduledAt).getTime() > Date.now() : false;
   const canCancel = isFutureSchedule && targets.every((t) => t.status === 'QUEUED');
 
-  usePublicationEvents((event) => {
-    if (event.publicationId !== publicationId) return;
-    setTargets((prev) =>
-      prev.map((t) =>
-        t.provider === event.provider
-          ? {
-              ...t,
-              status: event.status,
-              providerUrl: event.providerUrl ?? t.providerUrl,
-              errorMessage: event.errorMessage ?? t.errorMessage,
-            }
-          : t,
-      ),
-    );
-  });
+  usePublicationStatusPolling(publicationId, targets, setTargets);
 
   async function handleRetry(provider: string) {
     const res = await fetch(`/api/publications/${publicationId}/retry`, {

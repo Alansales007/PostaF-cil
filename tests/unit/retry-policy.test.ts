@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { computeBackoffMs, decideRetry, isPermanentError } from '@/lib/queue/retry-policy';
+import { computeBackoffMs, decideRetry, isPermanentError } from '@/lib/inngest/retry-policy';
 
-describe('lib/queue/retry-policy', () => {
+describe('lib/inngest/retry-policy', () => {
   it('reconhece códigos de erro permanentes', () => {
     expect(isPermanentError('TOKEN_EXPIRED')).toBe(true);
     expect(isPermanentError('MISSING_SCOPE')).toBe(true);

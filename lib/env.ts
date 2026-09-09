@@ -12,7 +12,12 @@ const envSchema = z.object({
   NEXTAUTH_URL: z.string().url().optional(),
 
   DATABASE_URL: z.string().min(1, 'DATABASE_URL é obrigatório'),
-  REDIS_URL: z.string().min(1, 'REDIS_URL é obrigatório'),
+
+  // Fila serverless (substitui BullMQ+Redis) — ver lib/inngest/. Opcionais
+  // porque o Inngest Dev Server local não exige chaves; em produção, a
+  // própria lib do Inngest alerta se faltarem.
+  INNGEST_EVENT_KEY: z.string().optional(),
+  INNGEST_SIGNING_KEY: z.string().optional(),
 
   TOKEN_ENCRYPTION_KEY: z
     .string()

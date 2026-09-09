@@ -2,15 +2,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { DelayedError, Worker, type Job } from 'bullmq';
-import { getRedis } from '@/lib/redis';
+import { inngest } from '../client';
 import { db } from '@/lib/db';
 import { childLogger } from '@/lib/logger';
 import { getStorageService } from '@/services/storage';
 import { probeVideo, needsTranscodeForMediaFile, transcodeToH264Aac, buildTranscodedKey } from '@/services/mediaProcessor';
 import { enqueuePendingTargetsForMedia, failPendingTargetsForMedia } from '@/services/publicationService';
-import { decideRetry } from '@/lib/queue/retry-policy';
-import { TRANSCODE_QUEUE_NAME, type TranscodeJobData } from '@/lib/queue/transcode-queue';
+import { decideRetry } from '../retry-policy';
 
 const MAX_TRANSCODE_ATTEMPTS = 3;
 const READ_URL_EXPIRES_SECONDS = 60 * 60;
@@ -21,31 +19,51 @@ interface TranscodeMetadata {
 }
 
 /**
- * Consumer BullMQ que prepara um vídeo (MediaFile) para publicação quando
- * o original não está em MP4/H.264/AAC. Nunca sobrescreve o arquivo
- * original — lê da URL do storage (ffmpeg/ffprobe suportam HTTP(S)
- * nativamente, sem precisar baixar o arquivo inteiro antes) e escreve a
- * versão convertida em um caminho novo.
+ * Substitui workers/transcodeWorker.ts (consumer BullMQ). Mesma lógica de
+ * negócio (probe → decide se precisa converter → ffmpeg → upload →
+ * libera alvos pendentes), só troca o mecanismo de controle: cada
+ * tentativa é um `step.run()` isolado (o ffmpeg roda do início ao fim
+ * dentro de uma única invocação — não dá pra pausar no meio de um
+ * transcode em andamento), e o backoff entre tentativas usa
+ * `step.sleep()` em vez de `job.moveToDelayed()`.
  *
- * Idempotência: se por qualquer motivo este job rodar de novo depois do
- * MediaFile já estar READY, só libera os alvos pendentes sem rodar o
- * FFmpeg de novo. E se o vídeo estiver sendo usado por mais de uma
- * publicação ao mesmo tempo, `enqueuePendingTargetsForMedia` libera todas
- * elas — não só a que originalmente disparou este job.
+ * Idempotência: `id: mediaId` no evento (lib/inngest/events.ts) já evita
+ * duas transcodificações concorrentes do mesmo vídeo. Se mesmo assim esta
+ * função rodar com o MediaFile já `READY`, só libera os alvos pendentes.
  */
-async function processTranscodeJob(job: Job<TranscodeJobData>, token?: string): Promise<void> {
-  const log = childLogger({ jobId: job.id, mediaId: job.data.mediaId });
+export const transcodeMediaFunction = inngest.createFunction(
+  {
+    id: 'transcode-media',
+    triggers: { event: 'media/transcode.requested' },
+    concurrency: { limit: 2 },
+    retries: 0,
+  },
+  async ({ event, step }) => {
+    const { mediaId } = event.data as { mediaId: string };
 
-  const media = await db.mediaFile.findUnique({ where: { id: job.data.mediaId } });
+    for (let attempt = 1; attempt <= MAX_TRANSCODE_ATTEMPTS; attempt++) {
+      const result = await step.run(`attempt-${attempt}`, () => runTranscodeAttempt(mediaId, attempt));
+      if (result.outcome !== 'retry') return;
+      await step.sleep(`retry-wait-${attempt}`, result.delayMs);
+    }
+  },
+);
+
+type AttemptResult = { outcome: 'done' } | { outcome: 'given_up' } | { outcome: 'retry'; delayMs: number };
+
+async function runTranscodeAttempt(mediaId: string, attempt: number): Promise<AttemptResult> {
+  const log = childLogger({ mediaId, attempt });
+
+  const media = await db.mediaFile.findUnique({ where: { id: mediaId } });
   if (!media) {
-    log.warn('MediaFile não existe mais — encerrando job sem ação.');
-    return;
+    log.warn('MediaFile não existe mais — encerrando sem ação.');
+    return { outcome: 'done' };
   }
 
   if (media.status === 'READY') {
-    log.info('Mídia já está pronta (preparada por outro job) — só liberando alvos pendentes.');
+    log.info('Mídia já está pronta (preparada por outra execução) — só liberando alvos pendentes.');
     await enqueuePendingTargetsForMedia(media.id);
-    return;
+    return { outcome: 'done' };
   }
 
   const storage = getStorageService();
@@ -68,7 +86,7 @@ async function processTranscodeJob(job: Job<TranscodeJobData>, token?: string): 
       log.info({ videoCodec, audioCodec }, 'Vídeo já é compatível — pulando conversão.');
       await db.mediaFile.update({ where: { id: media.id }, data: { status: 'READY' } });
       await enqueuePendingTargetsForMedia(media.id);
-      return;
+      return { outcome: 'done' };
     }
 
     log.info({ videoCodec, audioCodec }, 'Iniciando transcodificação para MP4/H.264/AAC');
@@ -84,9 +102,8 @@ async function processTranscodeJob(job: Job<TranscodeJobData>, token?: string): 
 
     log.info('Transcodificação concluída com sucesso');
     await enqueuePendingTargetsForMedia(media.id);
+    return { outcome: 'done' };
   } catch (err) {
-    if (err instanceof DelayedError) throw err;
-
     const currentMeta = (media.metadata as TranscodeMetadata | null) ?? {};
     const attemptCount = (currentMeta.transcodeAttempts ?? 0) + 1;
     const message = err instanceof Error ? err.message : 'Falha desconhecida ao preparar o vídeo.';
@@ -100,8 +117,7 @@ async function processTranscodeJob(job: Job<TranscodeJobData>, token?: string): 
 
     if (decision.action === 'retry') {
       log.warn({ err, attemptCount }, 'Falha ao transcodificar — tentando de novo');
-      await job.moveToDelayed(Date.now() + decision.delayMs, token);
-      throw new DelayedError();
+      return { outcome: 'retry', delayMs: decision.delayMs };
     }
 
     log.error({ err, attemptCount }, 'Falha definitiva ao transcodificar — desistindo');
@@ -109,22 +125,8 @@ async function processTranscodeJob(job: Job<TranscodeJobData>, token?: string): 
       media.id,
       'Não foi possível preparar o vídeo para publicação (formato incompatível ou corrompido).',
     );
-    throw new Error(message);
+    return { outcome: 'given_up' };
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
-}
-
-let worker: Worker<TranscodeJobData> | undefined;
-
-export function startTranscodeWorker(): Worker<TranscodeJobData> {
-  if (worker) return worker;
-
-  worker = new Worker<TranscodeJobData>(TRANSCODE_QUEUE_NAME, processTranscodeJob, { connection: getRedis(), concurrency: 2 });
-
-  worker.on('failed', (job, err) => {
-    childLogger({ jobId: job?.id }).error({ err }, 'Job de transcodificação falhou definitivamente');
-  });
-
-  return worker;
 }

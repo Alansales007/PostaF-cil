@@ -4,13 +4,14 @@
 
 ## 1. Análise dos requisitos (resumo)
 
-O sistema precisa de três planos de execução bem separados, porque têm perfis de latência e de confiabilidade muito diferentes:
+O sistema precisa de dois planos de execução com perfis de latência bem diferentes:
 
 1. **Plano síncrono (HTTP)** — login, CRUD, OAuth connect/callback, upload resumível. Deve responder rápido (segundos).
-2. **Plano de processamento (worker)** — transcodificação FFmpeg e chamadas às APIs sociais (que podem levar minutos e exigem polling). Nunca deve rodar dentro de uma requisição HTTP.
-3. **Plano de notificação em tempo real** — SSE para refletir no navegador o que o worker está fazendo, sem polling agressivo do cliente.
+2. **Plano de processamento** — transcodificação FFmpeg e chamadas às APIs sociais (que podem levar minutos e exigem polling). Nunca roda dentro do ciclo de vida de uma requisição HTTP normal.
 
-Isso implica **dois processos Node/TS**: o app Next.js (frontend + API routes finas, só enfileiram trabalho) e um **worker** BullMQ separado (mesmo código-fonte, `tsx workers/index.ts`), ambos falando com o mesmo PostgreSQL/Redis/Storage. Rodar o worker fora do runtime serverless da Vercel é obrigatório — funções serverless têm timeout incompatível com polling de processamento de vídeo do Instagram/TikTok.
+**Decisão de arquitetura (revisada)**: o volume real do produto é baixo (~20 publicações/dia), então manter um worker BullMQ+Redis ligado 24h só para isso não se justifica em custo. O plano de processamento roda como **funções Inngest** — step functions serverless (`step.run`/`step.sleep`/`step.sleepUntil`), chamadas pelo Inngest Cloud através de uma única rota Next.js (`/api/inngest`, ver [lib/inngest](../lib/inngest)). Não existe processo próprio: a Vercel só executa código quando há um "step" de verdade para rodar; entre eles (ex.: esperando o horário agendado, ou o próximo poll de status), nenhum processo fica ligado. Isso elimina o segundo processo Node/TS que a versão anterior desta arquitetura exigia (`tsx workers/index.ts`) — hoje é **um único deploy** (o app Next.js na Vercel).
+
+Toda a lógica de decisão (classificação de erro, backoff exponencial, idempotência) é a mesma de antes e continua pura/testável sem I/O — só o mecanismo de controle mudou (`job.moveToDelayed()`+`DelayedError` do BullMQ → `step.sleep()` do Inngest). Ver riscos assumidos na seção 8.
 
 ## 2. Stack
 
@@ -19,10 +20,10 @@ Isso implica **dois processos Node/TS**: o app Next.js (frontend + API routes fi
 | Frontend | Next.js 14 (App Router) + React 18 + TS + Tailwind | SSR, mobile-first, rotas de API colocadas |
 | Auth do app | NextAuth.js v4 (Credentials + JWT) | Login próprio do PostaFácil é independente do OAuth das redes sociais |
 | ORM/DB | Prisma + PostgreSQL (compatível com Supabase Postgres) | Migrations versionadas, type-safety |
-| Storage | Camada `StorageService` sobre S3-compatible (`@aws-sdk/client-s3`) — funciona com R2, Backblaze ou Supabase Storage (S3-compatible) | Um único código para qualquer provedor |
-| Fila | BullMQ + Redis (ioredis) | Retry/backoff nativo, jobs atrasados = agendamento |
-| Transcodificação | FFmpeg via `fluent-ffmpeg`, executado só no worker | Nunca no processo web |
-| Tempo real | Server-Sent Events (`/api/events`) | Mais simples que WebSocket atrás de proxies/CDN, funciona bem em Safari iOS |
+| Storage | Camada `StorageService` sobre S3-compatible (`@aws-sdk/client-s3`) — hoje Cloudflare R2 em produção, disco local em dev | Um único código para qualquer provedor |
+| Fila | [Inngest](https://www.inngest.com/docs) (step functions serverless, via `/api/inngest`) | Sem processo permanente; `step.sleep`/`step.sleepUntil` cobrem polling e agendamento; free tier cobre o volume atual com folga |
+| Transcodificação | FFmpeg via `ffmpeg-static`/`ffprobe-static`, dentro da própria função Inngest de transcodificação | Roda sob demanda, sem worker dedicado (ver riscos, seção 8) |
+| Tempo real | Polling simples (`GET /api/publications/[id]` a cada 3s enquanto houver alvo não-terminal, ver [hooks/use-publication-status-polling.ts](../hooks/use-publication-status-polling.ts)) | Sem Redis/SSE — mais barato e simples nesse volume. Ponto de extensão: trocar só a implementação deste hook por SSE/WebSocket se o volume um dia justificar um push instantâneo |
 | Testes | Vitest + mocks de provider | Rápido, ESM nativo |
 
 ## 3. Árvore de diretórios
@@ -35,12 +36,13 @@ Isso implica **dois processos Node/TS**: o app Next.js (frontend + API routes fi
   /api/social/[provider]/connect|callback|disconnect
   /api/media/upload/init|chunk|complete
   /api/publications, /api/publications/[id], /api/publications/[id]/retry
-  /api/events
+  /api/inngest    -> serve() com as funções publish-target e transcode-media
 /components/{ui,dashboard,publication,providers,theme}
-/lib            -> db, redis, auth, crypto, logger, env, rate-limit, sse
+/lib            -> db, auth, crypto, logger, env, rate-limit
+/lib/inngest    -> client, events (envio), retry-policy, poll-decision, functions/publish-target, functions/transcode-media
+/hooks          -> use-publication-status-polling (tempo real)
 /services       -> mediaProcessor, storageService, publicationService, tokenService
 /providers      -> SocialProvider (contrato) + instagram/ facebook/ tiktok/ kwai/ mock/
-/workers        -> index, publishWorker, transcodeWorker, cleanupWorker
 /prisma         -> schema.prisma, migrations
 /types
 /utils
@@ -81,9 +83,11 @@ Todos os fluxos usam `state` assinado + persistido em `OAuthState` (expira em 10
 - Kwai: **confirmado por pesquisa** (não é suposição) que não existe hoje uma Kwai Open Platform pública equivalente às demais para publicação de vídeo — `KwaiProvider` não faz nenhuma chamada de rede real, só o contrato pronto.
 - Limites exatos de tamanho/duração/codec por plataforma mudam; ficam centralizados em `providers/*/constraints.ts` com comentário para revalidação periódica em vez de hardcode espalhado.
 - **Transcodificação (MediaProcessor/FFmpeg)**: implementada — ver seção 10 abaixo. Usa `ffmpeg-static`/`ffprobe-static` (binários próprios, não depende de FFmpeg instalado no SO). Só entra em ação quando o vídeo realmente precisa (container/codec incompatível) — nunca degrada um vídeo que já está em MP4/H.264/AAC, e nunca corta/redimensiona para "corrigir" proporção (isso fica só como aviso ao usuário).
-- **Docker + `ffmpeg-static` em Alpine**: os Dockerfiles usam `node:20-slim` (Debian/glibc), não `node:20-alpine` (musl) — o binário do ffmpeg-static é compilado contra glibc e é sabidamente instável em Alpine. Não foi possível testar isso num container Linux de verdade neste ambiente (sandbox Windows); só validei os binários rodando nativamente no Windows.
-- A verificação de ponta a ponta da fila (BullMQ + Redis reais) não pôde ser executada neste ambiente de desenvolvimento (sem Redis disponível) — a lógica de decisão (retry, idempotência, agregação de status) tem cobertura de teste unitário completa e sem I/O; a execução ao vivo do worker precisa ser validada pelo usuário com um Redis real.
-- **Agendamento** (ETAPA 8) reaproveita o `delay` nativo do BullMQ — sem cron externo. Simplificação deliberada: o usuário não escolhe um fuso horário diferente do detectado no próprio navegador, porque converter "horário de parede em um fuso arbitrário" para um instante UTC corretamente exige uma biblioteca de timezone (ex.: Luxon) que não foi adicionada nesta etapa.
+- **Docker (`Dockerfile`, self-host opcional) + `ffmpeg-static` em Alpine**: usa `node:20-slim` (Debian/glibc), não `node:20-alpine` (musl) — o binário do ffmpeg-static é compilado contra glibc e é sabidamente instável em Alpine. A Vercel (deploy padrão) não usa este Dockerfile — ele fica só como caminho alternativo de self-host.
+- A verificação de ponta a ponta das funções Inngest não pôde ser executada neste ambiente de desenvolvimento sandboxed — a lógica de decisão (retry, idempotência, agregação de status) tem cobertura de teste unitário completa e sem I/O, idêntica à usada antes com BullMQ; a execução ao vivo (Inngest Dev Server local, depois produção) precisa ser validada pelo usuário.
+- **Transcodificação de vídeos grandes pode estourar o tempo máximo de execução de uma função Vercel**, mesmo com "Fluid Compute" habilitado no plano Hobby (teto de 300s). Mitigado parcialmente pela troca do preset do ffmpeg de `slow` para `veryfast` (mesmo CRF, bem mais rápido) e pelo fato de vídeos de Reels/TikTok/Kwai já serem curtos por natureza da própria plataforma. Se isso se mostrar um problema real em produção, os próximos passos seriam um serviço de transcodificação dedicado (Cloudflare Stream/Mux) ou upgrade para o plano Pro da Vercel (até 800s).
+- **Agendamento** (ETAPA 8) usa `step.sleepUntil()` do Inngest — sem cron externo, mesma simplificação de antes (o BullMQ usava seu `delay` nativo). O usuário ainda não escolhe um fuso horário diferente do detectado no próprio navegador, porque converter "horário de parede em um fuso arbitrário" para um instante UTC corretamente exige uma biblioteca de timezone (ex.: Luxon) que não foi adicionada nesta etapa.
+- **Tempo real por polling**: trocar o SSE+Redis por polling de 3s (`hooks/use-publication-status-polling.ts`) foi uma decisão deliberada de custo/simplicidade para o volume atual — publicar já leva minutos mesmo, então um atraso de até 3s pra atualizar a tela é imperceptível. Se o volume crescer a ponto de valer a pena um push instantâneo, o hook foi desenhado como ponto de extensão único: trocar só a implementação interna por SSE/WebSocket, mantendo a mesma assinatura.
 - **Next.js**: atualizado de 14.2.5 para 14.2.35 (última correção dentro da própria 14.2.x) na ETAPA 9 depois de `npm audit` acusar CVEs conhecidos, incluindo um bypass de autorização no middleware — o exato mecanismo em que este projeto se apoia para proteger rotas. Algumas advisories listadas pelo `npm audit` só têm correção completa em Next.js 15/16 (major); não fiz esse upgrade nesta sessão por ser uma mudança grande demais para aplicar sem conseguir testar visualmente no navegador — fica registrado como risco residual conhecido, não como algo ignorado.
 
 ## 9. Regra de implementação
@@ -92,17 +96,17 @@ Nenhum endpoint, parâmetro ou escopo é implementado "de memória" nas etapas 3
 
 ## 10. MediaProcessor (transcodificação)
 
-Implementado em [services/mediaProcessor.ts](../services/mediaProcessor.ts), acionado pelo [transcodeWorker](../workers/transcodeWorker.ts) — um consumer BullMQ próprio, separado do `publishWorker`.
+Implementado em [services/mediaProcessor.ts](../services/mediaProcessor.ts), acionado pela função [transcode-media](../lib/inngest/functions/transcode-media.ts) — uma função Inngest própria, separada da `publish-target`.
 
 **Quando roda**: `createPublication()` decide, a partir do `videoCodec`/`audioCodec` já detectados no upload (via `ffprobe`, logo após `/api/media/upload/[id]/complete`), se o vídeo precisa ser convertido. Só entram nessa conta container/codec — nunca proporção (isso continua só um aviso na pré-validação, não um motivo para cortar/redimensionar o vídeo do usuário sem pedir).
 
 **Fluxo**:
 1. `POST /api/media/upload/[id]/complete` já faz um probe rápido (ffprobe lendo a URL do storage via Range HTTP — não baixa o arquivo inteiro) e grava `videoCodec`/`audioCodec` no `MediaFile`.
-2. Se `createPublication()` detectar incompatibilidade, marca a mídia como `PROCESSING` e enfileira **um único job de transcodificação por `mediaId`** (`jobId = mediaId`, mesma âncora de idempotência das outras filas) — nunca por publicação, então duas publicações usando o mesmo vídeo ao mesmo tempo não disparam duas conversões.
-3. `transcodeWorker` lê o vídeo direto da URL do storage (ffmpeg/ffprobe suportam HTTP(S) nativamente — confirmado via `-protocols` nos binários do `ffmpeg-static`/`ffprobe-static`), recodifica para MP4/H.264/AAC preservando resolução e proporção (sem `-vf`/`-aspect`), e sobe o resultado para uma chave **irmã** da original (`.../transcoded.mp4`) — o arquivo original nunca é sobrescrito.
-4. Ao terminar (sucesso ou falha definitiva), consulta o banco por **todas** as publicações que estejam esperando aquele `mediaId` (não só a que criou o job) e libera/falha os alvos de cada uma — cobre o caso de o mesmo vídeo ser reaproveitado em outra publicação enquanto a conversão ainda está rodando.
-5. `publishWorker` sempre prefere `transcodedStoragePath` quando ele existe.
+2. Se `createPublication()` detectar incompatibilidade, marca a mídia como `PROCESSING` e envia **um único evento de transcodificação por `mediaId`** (`id: mediaId` no `inngest.send`, mesma âncora de idempotência usada para os alvos de publicação) — nunca por publicação, então duas publicações usando o mesmo vídeo ao mesmo tempo não disparam duas conversões.
+3. A função `transcode-media` lê o vídeo direto da URL do storage (ffmpeg/ffprobe suportam HTTP(S) nativamente — confirmado via `-protocols` nos binários do `ffmpeg-static`/`ffprobe-static`), recodifica para MP4/H.264/AAC preservando resolução e proporção (sem `-vf`/`-aspect`), e sobe o resultado para uma chave **irmã** da original (`.../transcoded.mp4`) — o arquivo original nunca é sobrescrito.
+4. Ao terminar (sucesso ou falha definitiva), consulta o banco por **todas** as publicações que estejam esperando aquele `mediaId` (não só a que disparou o evento) e libera/falha os alvos de cada uma — cobre o caso de o mesmo vídeo ser reaproveitado em outra publicação enquanto a conversão ainda está rodando.
+5. A função `publish-target` sempre prefere `transcodedStoragePath` quando ele existe.
 
-**Retry**: até 3 tentativas com o mesmo backoff exponencial das outras filas ([lib/queue/retry-policy.ts](../lib/queue/retry-policy.ts)); falha definitiva marca só os alvos que dependiam daquele vídeo como `FAILED`, com mensagem clara — nunca marca o `MediaFile` original como inválido (ele pode ainda ser reaproveitado numa tentativa futura).
+**Retry**: até 3 tentativas com o mesmo backoff exponencial da função de publicação ([lib/inngest/retry-policy.ts](../lib/inngest/retry-policy.ts)), com `step.sleep()` entre elas; falha definitiva marca só os alvos que dependiam daquele vídeo como `FAILED`, com mensagem clara — nunca marca o `MediaFile` original como inválido (ele pode ainda ser reaproveitado numa tentativa futura).
 
 **Verificado de verdade, não só por tipos**: [tests/integration/media-processor-ffmpeg.test.ts](../tests/integration/media-processor-ffmpeg.test.ts) gera um vídeo sintético com codecs propositalmente incompatíveis (mpeg4/mp3 em AVI), roda o `MediaProcessor` de ponta a ponta com os binários reais do `ffmpeg-static`/`ffprobe-static`, e confirma com `ffprobe` que a saída é H.264/AAC preservando a resolução original.

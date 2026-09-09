@@ -14,9 +14,10 @@ vi.mock('@/lib/db', () => ({
   },
 }));
 
-vi.mock('@/lib/queue/publish-queue', () => ({
+vi.mock('@/lib/inngest/events', () => ({
   enqueuePublishTarget: (...args: unknown[]) => enqueueMock(...args),
-  removeQueuedJob: vi.fn(),
+  cancelPublishTarget: vi.fn(),
+  enqueueTranscode: vi.fn(),
 }));
 
 const { createPublication, PublicationValidationError } = await import('@/services/publicationService');

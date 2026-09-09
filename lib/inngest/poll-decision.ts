@@ -3,7 +3,7 @@ import type { PublishJobStatus } from '@/providers/SocialProvider';
 
 /**
  * Decide o que fazer depois de consultar getPublishStatus() de um
- * provider — lógica pura (sem BullMQ/Prisma), para o worker real e os
+ * provider — lógica pura (sem Inngest/Prisma), para a função real e os
  * testes usarem exatamente a mesma decisão.
  */
 export interface PollOutcomeInput {
@@ -38,7 +38,7 @@ export function decidePollOutcome(input: PollOutcomeInput): PollOutcome {
 
 /**
  * Idempotência: nunca criar um segundo container/job na plataforma para o
- * mesmo alvo. Se já existe um providerContainerId, o worker deve só
+ * mesmo alvo. Se já existe um providerContainerId, a função deve só
  * continuar monitorando (getPublishStatus), nunca chamar publishVideo() de novo.
  */
 export function shouldStartNewJob(target: { providerContainerId: string | null }): boolean {

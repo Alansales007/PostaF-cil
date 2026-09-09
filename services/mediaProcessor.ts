@@ -126,7 +126,11 @@ export function buildTranscodedKey(originalStoragePath: string): string {
  *
  * -c:v libx264 -pix_fmt yuv420p: H.264 com subamostragem de cor universal
  *   (compatível com todo player/rede, incluindo os mais antigos).
- * -crf 18 -preset slow: qualidade alta preservada (CRF baixo = menos perda).
+ * -crf 18 -preset veryfast: qualidade alta preservada (CRF baixo = menos
+ *   perda); preset rápido de propósito — isto roda dentro de uma função
+ *   serverless da Vercel com tempo de execução limitado (maxDuration),
+ *   não num worker de longa duração. "slow" preservaria um pouco mais de
+ *   qualidade por bit, mas arrisca estourar o limite em vídeos maiores.
  * -c:a aac -b:a 192k: áudio AAC em bitrate alto, sem perder sincronia
  *   (o ffmpeg resample/ressincroniza automaticamente ao recodificar).
  * -movflags +faststart: MP4 pronto para streaming progressivo.
@@ -143,7 +147,7 @@ export function buildFfmpegArgs(inputPath: string, outputPath: string): string[]
     '-pix_fmt',
     'yuv420p',
     '-preset',
-    'slow',
+    'veryfast',
     '-crf',
     '18',
     '-c:a',

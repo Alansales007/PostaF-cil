@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { decidePollOutcome, shouldStartNewJob } from '@/lib/queue/poll-decision';
+import { decidePollOutcome, shouldStartNewJob } from '@/lib/inngest/poll-decision';
 
-describe('lib/queue/poll-decision', () => {
+describe('lib/inngest/poll-decision', () => {
   it('shouldStartNewJob é true só quando ainda não existe um container/job na plataforma', () => {
     expect(shouldStartNewJob({ providerContainerId: null })).toBe(true);
     expect(shouldStartNewJob({ providerContainerId: 'abc123' })).toBe(false);

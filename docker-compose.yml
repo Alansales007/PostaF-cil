@@ -1,14 +1,16 @@
-# Stack completa para rodar o PostaFácil localmente com Postgres e Redis de
-# verdade — inclusive para validar a fila/worker de ponta a ponta, algo que
-# não é possível sem essa infraestrutura. Não é uma receita de produção
-# pronta (sem TLS, sem backups, sem múltiplas réplicas) — é o ambiente de
-# desenvolvimento/homologação mais próximo do real.
+# Stack para rodar o PostaFácil localmente com Postgres de verdade. Não é
+# uma receita de produção pronta (sem TLS, sem backups, sem múltiplas
+# réplicas) — é o ambiente de desenvolvimento/homologação mais próximo do
+# real. Não existe mais serviço de worker/Redis: a fila (Inngest) roda
+# dentro da própria rota /api/inngest do app — ver docs/ARCHITECTURE.md.
+# Para desenvolver a fila localmente, use `npm run inngest:dev` (Inngest
+# Dev Server) em paralelo, fora deste compose.
 #
 # Uso:
-#   cp .env.example .env   # preencha DATABASE_URL/REDIS_URL como abaixo
-#   docker compose up -d postgres redis
+#   cp .env.example .env   # preencha DATABASE_URL como abaixo
+#   docker compose up -d postgres
 #   docker compose run --rm app npx prisma migrate deploy
-#   docker compose up -d app worker
+#   docker compose up -d app
 
 services:
   postgres:
@@ -27,16 +29,6 @@ services:
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - '6379:6379'
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   app:
     build:
       context: .
@@ -44,27 +36,10 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://postafacil:postafacil@postgres:5432/postafacil?schema=public
-      REDIS_URL: redis://redis:6379
     ports:
       - '3000:3000'
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql://postafacil:postafacil@postgres:5432/postafacil?schema=public
-      REDIS_URL: redis://redis:6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
 
 volumes:
