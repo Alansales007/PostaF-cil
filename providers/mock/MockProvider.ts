@@ -21,13 +21,18 @@ import type {
  * acompanhar status, falhar, tentar de novo) sem publicar nada de verdade
  * e sem precisar de credenciais reais de nenhuma plataforma.
  *
- * O "estado" de cada job de publicação simulado avança progressivamente
- * a cada chamada de getPublishStatus, para exercitar o polling assíncrono
- * do jeito que as APIs reais funcionam.
+ * O "estado" de cada job de publicação simulado avança conforme o tempo
+ * real passa desde publishVideo() (embutido no próprio providerJobId),
+ * para exercitar o polling assíncrono do jeito que as APIs reais
+ * funcionam — precisa ser assim (sem estado em memória do processo) porque
+ * quem chama isto agora são funções Inngest sem processo permanente: cada
+ * getPublishStatus() pode acontecer numa invocação/instância diferente da
+ * que criou o job, então um contador em memória (Map/variável local)
+ * sempre voltaria a zero e o mock nunca chegaria a PUBLISHED.
  */
 export class MockProvider implements SocialProvider {
   readonly isAvailable = true;
-  private jobPollCount = new Map<string, number>();
+  private static readonly SIMULATED_PROCESSING_MS = 4_000;
 
   constructor(readonly id: SocialProviderId) {}
 
@@ -93,17 +98,19 @@ export class MockProvider implements SocialProvider {
     return { compatible: reasons.length === 0, needsConversion: false, reasons };
   }
 
-  async publishVideo(input: PublishVideoInput): Promise<PublishVideoResult> {
-    const providerJobId = `mockjob_${randomUUID()}`;
-    this.jobPollCount.set(providerJobId, 0);
+  async publishVideo(_input: PublishVideoInput): Promise<PublishVideoResult> {
+    // O timestamp de criação vai embutido no próprio id — é o que permite
+    // decidir PROCESSING vs PUBLISHED sem guardar nada em memória (ver
+    // comentário da classe).
+    const providerJobId = `mockjob_${Date.now()}_${randomUUID()}`;
     return { providerJobId };
   }
 
   async getPublishStatus(_accessToken: string, providerJobId: string): Promise<PublishStatusResult> {
-    const count = (this.jobPollCount.get(providerJobId) ?? 0) + 1;
-    this.jobPollCount.set(providerJobId, count);
+    const createdAt = Number(providerJobId.split('_')[1]);
+    const elapsedMs = Number.isFinite(createdAt) ? Date.now() - createdAt : Number.POSITIVE_INFINITY;
 
-    if (count < 2) {
+    if (elapsedMs < MockProvider.SIMULATED_PROCESSING_MS) {
       return { status: 'PROCESSING' };
     }
     return {

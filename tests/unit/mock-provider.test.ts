@@ -25,21 +25,45 @@ describe('providers/mock/MockProvider', () => {
     expect(account.providerAccountId).toContain('instagram');
   });
 
-  it('avança o status de publicação de PROCESSING para PUBLISHED entre chamadas', async () => {
-    const provider = new MockProvider('TIKTOK');
-    const { providerJobId } = await provider.publishVideo({
+  it('avança o status de publicação de PROCESSING para PUBLISHED conforme o tempo passa', async () => {
+    // Sem estado em memória de propósito (ver comentário da classe) — o
+    // avanço depende só do relógio, então o teste controla o tempo em vez
+    // de contar chamadas.
+    vi.useFakeTimers();
+    try {
+      const provider = new MockProvider('TIKTOK');
+      const { providerJobId } = await provider.publishVideo({
+        accessToken: 'mock-access-x',
+        videoUrl: 'https://example.com/video.mp4',
+        caption: 'legenda de teste',
+        correlationId: 'PUB-TEST-0001',
+      });
+
+      const first = await provider.getPublishStatus('mock-access-x', providerJobId);
+      expect(first.status).toBe('PROCESSING');
+
+      vi.advanceTimersByTime(10_000);
+
+      const second = await provider.getPublishStatus('mock-access-x', providerJobId);
+      expect(second.status).toBe('PUBLISHED');
+      expect(second.providerPostId).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('mantém o status PROCESSING se chamado de uma instância diferente (sem estado em memória)', async () => {
+    // Simula o cenário real que quebrava antes: getPublishStatus rodando
+    // numa invocação/instância serverless diferente da que criou o job.
+    const { providerJobId } = await new MockProvider('TIKTOK').publishVideo({
       accessToken: 'mock-access-x',
       videoUrl: 'https://example.com/video.mp4',
       caption: 'legenda de teste',
-      correlationId: 'PUB-TEST-0001',
+      correlationId: 'PUB-TEST-0002',
     });
 
-    const first = await provider.getPublishStatus('mock-access-x', providerJobId);
-    expect(first.status).toBe('PROCESSING');
-
-    const second = await provider.getPublishStatus('mock-access-x', providerJobId);
-    expect(second.status).toBe('PUBLISHED');
-    expect(second.providerPostId).toBeDefined();
+    const status = await new MockProvider('TIKTOK').getPublishStatus('mock-access-x', providerJobId);
+    expect(status.status).toBe('PROCESSING');
   });
 
   it('reprova mídia que não é vídeo', async () => {
