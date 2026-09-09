@@ -8,6 +8,11 @@ import { describeInstagramError } from '@/providers/instagram/errors';
 
 const REDIRECT_BASE = '/settings/accounts';
 
+// Callback de OAuth real (redirect vindo da plataforma) — nunca deve ser
+// avaliado em build; não usa cookies(), então o Next.js poderia tentar
+// otimizá-lo como estático sem isso.
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   const url = req.nextUrl;
   const code = url.searchParams.get('code');

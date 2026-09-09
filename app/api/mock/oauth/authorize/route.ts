@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { getEnv } from '@/lib/env';
 
+// Não usa cookies()/sessão — sem isso o Next.js pode tentar otimizar esta
+// rota como estática em build e chamar getEnv() sem nenhuma env var real
+// disponível. Nunca deve ser avaliada em build, só por requisição de verdade.
+export const dynamic = 'force-dynamic';
+
 /**
  * Simula a tela de consentimento de uma rede social. Só existe quando
  * MOCK_SOCIAL_APIS=true — deixa testar o fluxo de "Conectar" ponta a ponta

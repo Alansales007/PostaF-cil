@@ -10,6 +10,9 @@ import { describeFacebookError } from '@/providers/facebook/errors';
 
 const REDIRECT_BASE = '/settings/accounts';
 
+// Callback de OAuth real — ver a mesma observação em instagram/callback/route.ts.
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   const url = req.nextUrl;
   const code = url.searchParams.get('code');

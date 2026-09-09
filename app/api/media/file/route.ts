@@ -14,6 +14,10 @@ import { verifyLocalToken, type LocalReadTokenPayload } from '@/lib/upload/local
  * Em produção (S3-compatible) esta rota não é usada — o vídeo é lido
  * diretamente da URL assinada do storage.
  */
+// Autentica só pelo token assinado na query string (sem cookies()) — sem
+// isso o Next.js poderia tentar otimizar esta rota como estática em build.
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   const token = req.nextUrl.searchParams.get('token');
   const payload = token ? verifyLocalToken<LocalReadTokenPayload>(token) : null;

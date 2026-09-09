@@ -48,5 +48,11 @@ export interface StorageService {
   /** URL temporária (assinada) para leitura — usada quando uma API social exige acesso por URL. */
   getReadUrl(input: { key: string; expiresInSeconds: number }): Promise<string>;
 
+  /** Baixa o objeto inteiro para um arquivo local — usado pelo MediaProcessor (FFmpeg precisa do arquivo completo em disco). */
+  downloadToFile(input: { key: string; destPath: string }): Promise<void>;
+
+  /** Envia um arquivo local inteiro para o storage (ex.: o vídeo já transcodificado). */
+  uploadFile(input: { key: string; sourcePath: string; contentType: string }): Promise<void>;
+
   deleteObject(input: { key: string }): Promise<void>;
 }

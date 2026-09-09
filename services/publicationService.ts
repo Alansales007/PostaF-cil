@@ -1,9 +1,12 @@
 import type { PublicationStatus } from '@prisma/client';
 import { db } from '@/lib/db';
-import { generateCorrelationId } from '@/lib/logger';
+import { generateCorrelationId, logger } from '@/lib/logger';
 import { enqueuePublishTarget, removeQueuedJob } from '@/lib/queue/publish-queue';
+import { enqueueTranscode } from '@/lib/queue/transcode-queue';
 import { appendHistoryEntry } from '@/lib/publication/history';
 import { computeScheduleDelayMs, isCancellable, InvalidScheduleError } from '@/lib/publication/schedule';
+import { needsTranscodeForMediaFile } from '@/services/mediaProcessor';
+import { aggregatePublicationStatus } from '@/lib/publication/status';
 import type { SocialProviderId } from '@/types';
 
 export class PublicationValidationError extends Error {}
@@ -102,13 +105,77 @@ export async function createPublication(userId: string, input: CreatePublication
     return tx.publication.findUniqueOrThrow({ where: { id: created.id }, include: { targets: true } });
   });
 
-  await Promise.all(publication.targets.map((target) => enqueuePublishTarget(target.id, { delayMs })));
+  // Se o vídeo já é MP4/H.264/AAC (ou já foi transcodificado antes por
+  // outra publicação), publica direto. Senão, prepara o vídeo primeiro —
+  // o transcodeWorker é quem libera os alvos desta publicação (e de
+  // qualquer outra publicação que esteja esperando o mesmo vídeo) assim
+  // que terminar. Nunca altera o arquivo original.
+  if (media.status !== 'READY' && needsTranscodeForMediaFile(media.mimeType, media.videoCodec, media.audioCodec)) {
+    await db.mediaFile.update({ where: { id: media.id }, data: { status: 'PROCESSING' } });
+    await enqueueTranscode(media.id);
+  } else {
+    await Promise.all(publication.targets.map((target) => enqueuePublishTarget(target.id, { delayMs })));
+  }
 
   await db.auditLog.create({
     data: { userId, action: 'publication.created', entityType: 'Publication', entityId: publication.id, correlationId },
   });
 
   return publication;
+}
+
+/**
+ * Enfileira os alvos ainda não iniciados de toda publicação que estava
+ * esperando este vídeo terminar de ser preparado (pode ser mais de uma,
+ * se o mesmo vídeo foi usado em publicações diferentes enquanto a
+ * primeira transcodificação ainda rodava). Recalcula o delay de cada
+ * alvo a partir do agendamento de cada publicação — não de um valor
+ * congelado no momento da criação — para respeitar o horário certo mesmo
+ * que a transcodificação tenha demorado.
+ */
+export async function enqueuePendingTargetsForMedia(mediaId: string): Promise<void> {
+  const targets = await db.publicationTarget.findMany({
+    where: { status: 'QUEUED', publication: { mediaId } },
+    include: { publication: true },
+  });
+
+  await Promise.all(
+    targets.map((target) => {
+      const delayMs = target.publication.scheduledAt
+        ? Math.max(0, target.publication.scheduledAt.getTime() - Date.now())
+        : 0;
+      return enqueuePublishTarget(target.id, { delayMs });
+    }),
+  );
+}
+
+/** Quando a transcodificação falha definitivamente, marca como FAILED todo alvo que dependia dela. */
+export async function failPendingTargetsForMedia(mediaId: string, errorMessage: string): Promise<void> {
+  const targets = await db.publicationTarget.findMany({ where: { status: 'QUEUED', publication: { mediaId } } });
+
+  for (const target of targets) {
+    await db.publicationTarget.update({
+      where: { id: target.id },
+      data: {
+        status: 'FAILED',
+        errorCode: 'TRANSCODE_FAILED',
+        errorMessage,
+        statusHistory: appendHistoryEntry(target.statusHistory, { at: new Date().toISOString(), status: 'FAILED', message: errorMessage }),
+      },
+    });
+  }
+
+  const publicationIds = [...new Set(targets.map((t) => t.publicationId))];
+  for (const publicationId of publicationIds) {
+    const publication = await db.publication.findUnique({ where: { id: publicationId }, include: { targets: true } });
+    if (!publication) continue;
+    await db.publication.update({
+      where: { id: publicationId },
+      data: { status: aggregatePublicationStatus(publication.targets.map((t) => t.status)) },
+    });
+  }
+
+  logger.warn({ mediaId, affectedTargets: targets.length }, 'Transcodificação falhou definitivamente — alvos marcados como FAILED');
 }
 
 export async function getPublicationForUser(userId: string, publicationId: string) {

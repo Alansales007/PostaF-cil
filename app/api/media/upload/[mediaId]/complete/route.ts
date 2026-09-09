@@ -8,6 +8,7 @@ import { getEnv } from '@/lib/env';
 import { getStorageService } from '@/services/storage';
 import { getMediaFileMetadata, getOwnedMediaFile } from '@/lib/media/get-owned-media-file';
 import { isLikelyVideoContainer } from '@/lib/upload/magic-bytes';
+import { probeVideo } from '@/services/mediaProcessor';
 
 const schema = z.object({
   // limite alinhado ao MAX_PARTS de lib/upload/part-plan.ts — corta cedo um
@@ -85,6 +86,23 @@ export async function POST(req: NextRequest, { params }: { params: { mediaId: st
   const env = getEnv();
   const deleteAfterAt = new Date(Date.now() + env.MEDIA_RETENTION_HOURS * 60 * 60 * 1000);
 
+  // Integridade #3 / preparação do MediaProcessor: detecta o codec real
+  // (ffprobe lê só o cabeçalho via Range HTTP — não baixa o vídeo inteiro)
+  // para já saber, no momento da publicação, se vai precisar transcodificar.
+  // Falha ao probar não impede o upload de ser concluído — só fica sem
+  // codec conhecido, e o worker de transcodificação decide de forma
+  // conservadora (probar de novo ou transcodificar) quando chegar a hora.
+  let videoCodec: string | null = null;
+  let audioCodec: string | null = null;
+  try {
+    const readUrl = await storage.getReadUrl({ key: media.storagePath, expiresInSeconds: 300 });
+    const probe = await probeVideo(readUrl);
+    videoCodec = probe.videoCodec;
+    audioCodec = probe.audioCodec;
+  } catch (err) {
+    logger.warn({ err, mediaId: media.id }, 'Não foi possível detectar o codec do vídeo agora — será verificado na publicação');
+  }
+
   const updated = await db.mediaFile.update({
     where: { id: media.id },
     data: {
@@ -93,6 +111,8 @@ export async function POST(req: NextRequest, { params }: { params: { mediaId: st
       duration: parsed.data.duration,
       width: parsed.data.width,
       height: parsed.data.height,
+      videoCodec,
+      audioCodec,
       deleteAfterAt,
     },
   });

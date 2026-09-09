@@ -126,8 +126,16 @@ model MediaFile {
   width            Int?
   height           Int?
   checksum         String?
+  /// Codec real detectado via ffprobe após o upload (ex.: "h264", "hevc") —
+  /// usado pelo MediaProcessor para decidir se precisa transcodificar.
+  videoCodec       String?
+  audioCodec       String?
   status           MediaFileStatus  @default(UPLOADING)
   uploadSessionId  String?          @unique
+  /// Caminho no storage de uma versão MP4/H.264/AAC gerada pelo
+  /// MediaProcessor quando o original não é compatível — o arquivo
+  /// original em `storagePath` nunca é sobrescrito nem alterado.
+  transcodedStoragePath String?
   /// Detalhes técnicos do upload em chunks (partSize, totalParts) e
   /// eventuais metadados adicionais — não faz parte do domínio de negócio,
   /// fica em JSON para não poluir o schema com colunas de implementação.

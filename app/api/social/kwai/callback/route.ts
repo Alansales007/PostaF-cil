@@ -7,6 +7,9 @@ import { getSocialProvider } from '@/providers';
 
 const REDIRECT_BASE = '/settings/accounts';
 
+// Callback de OAuth real — ver a mesma observação em instagram/callback/route.ts.
+export const dynamic = 'force-dynamic';
+
 /** Só é alcançável de verdade em modo mock — em modo real, /connect já barra antes de chegar aqui. */
 export async function GET(req: NextRequest) {
   const url = req.nextUrl;

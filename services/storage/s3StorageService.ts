@@ -6,10 +6,15 @@ import {
   AbortMultipartUploadCommand,
   ListPartsCommand,
   GetObjectCommand,
+  PutObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createWriteStream, createReadStream } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
+import path from 'node:path';
 import { getEnv } from '@/lib/env';
 import type {
   CompleteMultipartUploadInput,
@@ -122,6 +127,25 @@ export class S3StorageService implements StorageService {
     }
     const command = new GetObjectCommand({ Bucket: this.bucket, Key: key });
     return getSignedUrl(this.client, command, { expiresIn: expiresInSeconds });
+  }
+
+  async downloadToFile({ key, destPath }: { key: string; destPath: string }): Promise<void> {
+    const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+    if (!result.Body) throw new Error(`Objeto "${key}" não retornou corpo ao baixar do S3.`);
+
+    await mkdir(path.dirname(destPath), { recursive: true });
+    await pipeline(result.Body as NodeJS.ReadableStream, createWriteStream(destPath));
+  }
+
+  async uploadFile({ key, sourcePath, contentType }: { key: string; sourcePath: string; contentType: string }): Promise<void> {
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: createReadStream(sourcePath),
+        ContentType: contentType,
+      }),
+    );
   }
 
   async deleteObject({ key }: { key: string }) {

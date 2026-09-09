@@ -126,6 +126,16 @@ export class LocalStorageService implements StorageService {
     return `${env.APP_URL}/api/media/file?token=${encodeURIComponent(token)}`;
   }
 
+  async downloadToFile({ key, destPath }: { key: string; destPath: string }): Promise<void> {
+    await fs.mkdir(path.dirname(destPath), { recursive: true });
+    await fs.copyFile(this.objectFile(key), destPath);
+  }
+
+  async uploadFile({ key, sourcePath }: { key: string; sourcePath: string; contentType: string }): Promise<void> {
+    await fs.mkdir(path.dirname(this.objectFile(key)), { recursive: true });
+    await fs.copyFile(sourcePath, this.objectFile(key));
+  }
+
   async deleteObject({ key }: { key: string }) {
     await fs.rm(this.objectFile(key), { force: true });
   }

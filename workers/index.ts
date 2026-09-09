@@ -1,28 +1,28 @@
 import { logger } from '@/lib/logger';
 import { getEnv } from '@/lib/env';
 import { startPublishWorker } from '@/workers/publishWorker';
+import { startTranscodeWorker } from '@/workers/transcodeWorker';
 
 /**
  * Bootstrap do processo worker (BullMQ). Roda separado do app Next.js
- * (`npm run worker`), pois polling de status das APIs sociais (e, mais à
- * frente, transcodificação FFmpeg) não podem viver dentro do ciclo de
- * vida de uma requisição HTTP/serverless.
+ * (`npm run worker`), pois polling de status das APIs sociais e
+ * transcodificação FFmpeg não podem viver dentro do ciclo de vida de uma
+ * requisição HTTP/serverless.
  *
- * transcodeWorker e cleanupWorker continuam como placeholders — a
- * transcodificação de vídeo (MediaProcessor/FFmpeg) e o expurgo automático
- * de mídia temporária ficam para uma próxima iteração; por ora o pipeline
- * de publicação usa o vídeo original enviado pelo usuário.
+ * cleanupWorker continua como placeholder — o expurgo automático de mídia
+ * temporária fica para uma próxima iteração.
  */
 async function main() {
   const env = getEnv();
   logger.info({ mockMode: env.MOCK_SOCIAL_APIS }, 'PostaFácil worker iniciando...');
 
   const publishWorker = startPublishWorker();
-  logger.info('Consumer de publicação (publish-target) no ar.');
+  const transcodeWorker = startTranscodeWorker();
+  logger.info('Consumers de publicação (publish-target) e transcodificação (transcode-media) no ar.');
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Encerrando worker...');
-    await publishWorker.close();
+    await Promise.all([publishWorker.close(), transcodeWorker.close()]);
     process.exit(0);
   };
 

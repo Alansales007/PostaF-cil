@@ -37,3 +37,11 @@ prisma/dev.db-journal
 tmp/
 .data/
 .claude/
+
+.vercel
+.env*
+
+# skills auto-instaladas por integrações do marketplace da Vercel
+# (Prisma Postgres, Upstash) — documentação de referência, não é código do app
+.agents/
+skills-lock.json

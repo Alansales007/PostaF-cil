@@ -4,7 +4,7 @@
 
 Painel web para publicar vídeos simultaneamente no Instagram, Facebook, TikTok e Kwai, usando **somente APIs oficiais** de cada plataforma (sem automação de navegador, scraping ou simulação de cliques).
 
-> Estado atual: **ETAPA 10 concluída** — todas as 10 etapas do roteiro original estão prontas: estrutura, banco, login, upload, as 4 integrações sociais, fila com retry/idempotência, agendamento, testes/segurança e o material de deploy (Docker + CI). O que falta a partir daqui é só configuração externa (credenciais reais das plataformas, infraestrutura de produção) — ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para o roteiro completo e a seção 15 abaixo para o checklist final.
+> Estado atual: as 10 etapas do roteiro original estão prontas — estrutura, banco, login, upload, as 4 integrações sociais, fila com retry/idempotência, agendamento, testes/segurança e o material de deploy (Docker + CI) — **mais a transcodificação de vídeo (MediaProcessor/FFmpeg)**, que não fazia parte das 10 etapas originais mas fecha um "nunca presuma" que ficava em aberto desde o upload. O que falta a partir daqui é só configuração externa (credenciais reais das plataformas, infraestrutura de produção) — ver [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) para o roteiro completo e a seção 15 abaixo para o checklist final.
 
 ## Sumário
 
@@ -117,7 +117,11 @@ O bucket guarda os vídeos **temporariamente**; a exclusão automática (24h con
 - `MAX_UPLOAD_SIZE_MB` (padrão 2048) e `ALLOWED_VIDEO_MIME_TYPES` controlam o que é aceito em `/api/media/upload/init`.
 - O vídeo nunca passa pelo processo Next.js: o navegador o divide em partes (~8MB, calculado em [lib/upload/part-plan.ts](lib/upload/part-plan.ts)) e envia cada uma diretamente ao storage por URL assinada — sem carregar o arquivo inteiro na memória do navegador.
 - Cada parte tenta novamente com backoff exponencial ([lib/upload/chunked-uploader.ts](lib/upload/chunked-uploader.ts)); ao recarregar a página com o mesmo arquivo, o upload retoma consultando ao storage quais partes já foram recebidas (`GET /api/media/upload/[mediaId]/parts`) em vez de reenviar tudo.
-- Integridade: o tamanho final é conferido contra o declarado, os primeiros bytes são validados como um container de vídeo real (MP4/MOV/WebM/AVI — [lib/upload/magic-bytes.ts](lib/upload/magic-bytes.ts)), e um checksum CRC32 é calculado no navegador enquanto os chunks são lidos ([lib/upload/crc32.ts](lib/upload/crc32.ts)). A validação definitiva de que o arquivo é um vídeo decodificável fica a cargo do FFmpeg no `MediaProcessor` (ETAPA 7).
+- Integridade: o tamanho final é conferido contra o declarado, os primeiros bytes são validados como um container de vídeo real (MP4/MOV/WebM/AVI — [lib/upload/magic-bytes.ts](lib/upload/magic-bytes.ts)), um checksum CRC32 é calculado no navegador enquanto os chunks são lidos ([lib/upload/crc32.ts](lib/upload/crc32.ts)), e logo em seguida o `ffprobe` detecta o codec real do vídeo (ver seção 5.2 e [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#10-mediaprocessor-transcodificação)).
+
+### 5.2 Transcodificação (MediaProcessor)
+
+Quando o vídeo não está em MP4/H.264/AAC (ex.: `.mov` em HEVC, comum em iPhones recentes; ou `.webm`/VP9), o `createPublication()` aciona automaticamente o [MediaProcessor](services/mediaProcessor.ts) antes de publicar — sem que o usuário precise fazer nada. Usa `ffmpeg-static`/`ffprobe-static` (binários próprios, não depende de FFmpeg instalado no servidor). O arquivo original **nunca** é sobrescrito nem alterado; a versão convertida fica num caminho irmão (`.../transcoded.mp4`) e é isso que é publicado. Proporção e resolução são sempre preservadas — a transcodificação corrige container/codec, não "conserta" enquadramento.
 
 ## 6. Configuração — Meta (Instagram)
 
@@ -244,6 +248,7 @@ Em produção, troque `http://localhost:3000` pelo domínio HTTPS real e cadastr
 - [ ] `Content-Security-Policy` avaliado e testado no navegador (não incluído por padrão — ver seção 18)
 - [ ] Rate limiting migrado de memória para Redis se rodar mais de uma instância do app
 - [ ] Avaliar upgrade do Next.js para a versão 15/16 (`npm audit`) — a 14.2.35 já corrige o bypass de autorização no middleware, mas algumas advisories restantes só têm correção completa em versões major
+- [ ] Testar a transcodificação (`transcodeWorker`) rodando de verdade no container Linux de produção — só foi validada nativamente no Windows neste ambiente; os Dockerfiles usam `node:20-slim` (não `alpine`) de propósito, por causa da compatibilidade do binário do ffmpeg-static com glibc
 
 ## 16. Modo mock (desenvolvimento sem credenciais)
 
@@ -287,9 +292,9 @@ Revisão manual do código (sem git configurado neste ambiente, então não deu 
 /lib            → db, auth, crypto, logger, env, rate-limit, utils, signed-token,
                    redis, upload/*, oauth/*, social/*, queue/* (fila + retry),
                    publication/* (status/histórico), realtime/* (SSE)
-/services       → storage/ (S3 + local), publicationService, tokenService, mediaProcessor (placeholder)
+/services       → storage/ (S3 + local), publicationService, tokenService, mediaProcessor (FFmpeg real)
 /providers      → contrato SocialProvider + instagram/ facebook/ tiktok/ kwai/ mock/
-/workers        → processo BullMQ separado — publishWorker real; transcode/cleanup ainda placeholders
+/workers        → processo BullMQ separado — publishWorker e transcodeWorker reais; cleanup ainda placeholder
 /prisma         → schema.prisma + migrations
 /types          → tipos compartilhados
 /tests          → testes unitários e de integração

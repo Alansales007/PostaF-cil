@@ -52,7 +52,11 @@ async function processPublishJob(job: Job<PublishJobData>, token?: string): Prom
 
   const { accessToken } = await getValidAccessToken(target.socialAccount);
   const packedToken = buildProviderAccessToken(target.provider, target.socialAccount.providerAccountId, accessToken);
-  const videoUrl = await storage.getReadUrl({ key: target.publication.media.storagePath, expiresInSeconds: READ_URL_EXPIRES_SECONDS });
+  // Prefere a versão transcodificada (MP4/H.264/AAC) quando o MediaProcessor
+  // precisou gerar uma — o arquivo original em storagePath nunca é usado
+  // para publicar se não for compatível, e nunca é alterado.
+  const storageKey = target.publication.media.transcodedStoragePath ?? target.publication.media.storagePath;
+  const videoUrl = await storage.getReadUrl({ key: storageKey, expiresInSeconds: READ_URL_EXPIRES_SECONDS });
   const caption = target.customCaption ?? target.publication.generalCaption ?? '';
 
   if (shouldStartNewJob(target)) {

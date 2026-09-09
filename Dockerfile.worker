@@ -1,17 +1,22 @@
-# Processo worker (BullMQ) — consome a fila de publicação. Precisa ser um
-# processo de longa duração (nunca uma função serverless): faz polling de
-# status nas APIs sociais e não pode viver dentro do ciclo de vida de uma
-# requisição HTTP. Roda via tsx (sem etapa de compilação própria).
+# Processo worker (BullMQ) — consome as filas de publicação e
+# transcodificação. Precisa ser um processo de longa duração (nunca uma
+# função serverless): faz polling de status nas APIs sociais e roda o
+# ffmpeg, que pode levar minutos num vídeo grande. Roda via tsx (sem
+# etapa de compilação própria).
+#
+# Base "slim" (Debian, glibc), não "alpine" (musl): o binário do
+# ffmpeg-static é compilado contra glibc — é aqui, no worker, que ele
+# roda de verdade (transcodeWorker.ts).
 
-FROM node:20-alpine AS deps
+FROM node:20-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --ignore-scripts
 
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
+RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 --gid nodejs nextjs
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
