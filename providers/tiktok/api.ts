@@ -174,6 +174,13 @@ export interface DirectPostOptions {
   disableStitch?: boolean;
 }
 
+/**
+ * Não usada por padrão pelo TikTokProvider (ver publishVideo()) — exige
+ * verificar a propriedade do domínio do vídeo no painel do TikTok, o que
+ * não é praticável de forma genérica. Mantida pronta caso um domínio
+ * verificado esteja disponível no futuro (evita o custo de banda de
+ * reenviar o vídeo em chunks via initDirectPostFileUpload).
+ */
 export async function initDirectPostFromUrl(
   accessToken: string,
   input: DirectPostOptions & { videoUrl: string },
@@ -250,6 +257,38 @@ export async function uploadDirectPostChunk(
   if (!res.ok) {
     throw new TikTokApiError(`Falha ao enviar chunk do vídeo para o TikTok (HTTP ${res.status})`);
   }
+}
+
+/**
+ * Descobre o tamanho do vídeo sem baixá-lo inteiro — pede só o primeiro
+ * byte via Range HTTP e lê o total a partir do `Content-Range` da
+ * resposta (mesma técnica já usada pelo MediaProcessor com o ffprobe).
+ * Necessário porque o FILE_UPLOAD do TikTok exige o `video_size` exato
+ * antes de começar a enviar os chunks.
+ */
+export async function fetchVideoSizeBytes(videoUrl: string): Promise<number> {
+  const res = await fetch(videoUrl, { headers: { Range: 'bytes=0-0' } });
+  const contentRange = res.headers.get('content-range'); // formato: "bytes 0-0/12345"
+  const total = contentRange?.split('/')[1];
+  if (total && Number.isFinite(Number(total))) {
+    return Number(total);
+  }
+
+  const contentLength = res.headers.get('content-length');
+  if (contentLength && Number.isFinite(Number(contentLength))) {
+    return Number(contentLength);
+  }
+
+  throw new TikTokApiError('Não foi possível determinar o tamanho do vídeo para enviar ao TikTok.');
+}
+
+/** Lê um intervalo de bytes específico do vídeo (Range HTTP) — usado para montar cada chunk do FILE_UPLOAD sem baixar o arquivo inteiro de uma vez. */
+export async function fetchVideoRange(videoUrl: string, start: number, end: number): Promise<Uint8Array> {
+  const res = await fetch(videoUrl, { headers: { Range: `bytes=${start}-${end}` } });
+  if (!res.ok) {
+    throw new TikTokApiError(`Falha ao ler parte do vídeo do storage (HTTP ${res.status}).`);
+  }
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 export type TikTokPublishStatusValue =

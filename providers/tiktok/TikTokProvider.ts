@@ -18,14 +18,18 @@ import { describeFailReason, describeTikTokError } from './errors';
 import {
   buildAuthorizationUrl,
   exchangeCodeForToken,
+  fetchVideoRange,
+  fetchVideoSizeBytes,
   getPublishStatus,
   getUserInfo,
-  initDirectPostFromUrl,
+  initDirectPostFileUpload,
   queryCreatorInfo,
   refreshAccessToken,
   revokeToken,
+  uploadDirectPostChunk,
   type TikTokPrivacyLevel,
 } from './api';
+import { computeFileUploadChunkPlan, getChunkRange, type FileUploadChunkPlan } from './file-upload-plan';
 
 /**
  * TikTok via Login Kit (OAuth 2.0 + PKCE obrigatório) + Content Posting API
@@ -126,25 +130,41 @@ export class TikTokProvider implements SocialProvider {
   }
 
   /**
-   * Publica via PULL_FROM_URL (o domínio da URL precisa estar verificado
-   * no painel do TikTok — ver README). Consulta Creator Info antes, como a
-   * API exige, e usa SELF_ONLY por padrão — ver nota da classe.
+   * Publica via FILE_UPLOAD, não PULL_FROM_URL — de propósito. PULL_FROM_URL
+   * exigiria verificar a propriedade do domínio do vídeo no painel do
+   * TikTok, o que não é praticável de forma genérica (o vídeo pode estar em
+   * qualquer storage S3-compatible, cujo domínio o usuário do PostaFácil
+   * não necessariamente consegue provar que possui — ex.: o endpoint
+   * compartilhado do Cloudflare R2). FILE_UPLOAD não tem essa exigência.
+   *
+   * Lê o vídeo do storage em pedaços via Range HTTP e reenvia cada pedaço
+   * ao `upload_url` do TikTok (ver providers/tiktok/file-upload-plan.ts
+   * para as regras de tamanho de chunk) — nunca baixa o arquivo inteiro de
+   * uma vez só. Consulta Creator Info antes, como a API exige, e usa
+   * SELF_ONLY por padrão — ver nota da classe.
    */
   async publishVideo(input: PublishVideoInput): Promise<PublishVideoResult> {
     try {
       const creatorInfo = await queryCreatorInfo(input.accessToken);
       const privacyLevel = pickDefaultPrivacyLevel(creatorInfo.privacy_level_options);
 
-      const result = await initDirectPostFromUrl(input.accessToken, {
-        videoUrl: input.videoUrl,
+      const videoSizeBytes = await fetchVideoSizeBytes(input.videoUrl);
+      const plan = computeFileUploadChunkPlan(videoSizeBytes);
+
+      const session = await initDirectPostFileUpload(input.accessToken, {
         title: input.caption,
         privacyLevel,
         disableComment: creatorInfo.comment_disabled,
         disableDuet: creatorInfo.duet_disabled,
         disableStitch: creatorInfo.stitch_disabled,
+        videoSizeBytes,
+        chunkSizeBytes: plan.chunkSizeBytes,
+        totalChunkCount: plan.totalChunkCount,
       });
 
-      return { providerJobId: result.publish_id };
+      await uploadVideoInChunks(input.videoUrl, session.upload_url, videoSizeBytes, plan);
+
+      return { providerJobId: session.publish_id };
     } catch (err) {
       throw new Error(describeTikTokError(err).message);
     }
@@ -194,4 +214,18 @@ export class TikTokProvider implements SocialProvider {
 function pickDefaultPrivacyLevel(options: TikTokPrivacyLevel[]): TikTokPrivacyLevel {
   if (options.includes('SELF_ONLY')) return 'SELF_ONLY';
   return options[0] ?? 'SELF_ONLY';
+}
+
+/**
+ * Envia os chunks em sequência (exigido pela API do TikTok — "file chunks
+ * must be uploaded sequentially") — nunca em paralelo. Cada chunk é lido
+ * do storage e reenviado ao TikTok um de cada vez, sem manter o vídeo
+ * inteiro em memória.
+ */
+async function uploadVideoInChunks(videoUrl: string, uploadUrl: string, videoSizeBytes: number, plan: FileUploadChunkPlan): Promise<void> {
+  for (let chunkIndex = 0; chunkIndex < plan.totalChunkCount; chunkIndex++) {
+    const { start, end } = getChunkRange(chunkIndex, plan, videoSizeBytes);
+    const chunk = await fetchVideoRange(videoUrl, start, end);
+    await uploadDirectPostChunk(uploadUrl, chunk, { start, end, totalSize: videoSizeBytes });
+  }
 }

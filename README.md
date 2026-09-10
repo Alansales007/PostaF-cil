@@ -157,7 +157,7 @@ Conferido contra a documentação oficial em setembro/2026 ([Login Kit](https://
 1. Crie um app em [developers.tiktok.com](https://developers.tiktok.com).
 2. Ative **Login Kit** e **Content Posting API**.
 3. Configure `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_REDIRECT_URI`.
-4. O PostaFácil publica via `PULL_FROM_URL` por padrão — o domínio do seu storage (`STORAGE_PUBLIC_BASE_URL` ou o do bucket) precisa estar **verificado** no painel do TikTok (Content Posting API > Domain Verification). Sem isso, use o modo `FILE_UPLOAD` (já implementado em [providers/tiktok/api.ts](providers/tiktok/api.ts), envio em chunks para a `upload_url` retornada pelo TikTok).
+4. O PostaFácil publica via `FILE_UPLOAD` por padrão (não `PULL_FROM_URL`) — de propósito: `PULL_FROM_URL` exigiria verificar a propriedade do domínio do storage no painel do TikTok, o que não é praticável de forma genérica (o vídeo pode estar em qualquer storage S3-compatible, cujo domínio nem sempre dá pra provar posse — ex.: o endpoint compartilhado do Cloudflare R2). `FILE_UPLOAD` não exige isso: o [TikTokProvider](providers/tiktok/TikTokProvider.ts) lê o vídeo do storage em pedaços (Range HTTP) e reenvia cada pedaço à `upload_url` do TikTok, seguindo as regras de tamanho de chunk da API ([providers/tiktok/file-upload-plan.ts](providers/tiktok/file-upload-plan.ts)). Não é preciso configurar Domain Verification no painel do TikTok.
 5. Apps **não auditados** só publicam em modo privado (`SELF_ONLY`) — é o que o PostaFácil usa por padrão até você passar pela auditoria da TikTok e a tela de publicação (ETAPA 7) obter consentimento explícito para outro nível de privacidade.
 6. Particularidade de implementação: o PKCE do TikTok deriva o `code_challenge` como SHA-256 do `code_verifier` **em hex**, não em base64url (diferente da maioria dos provedores OAuth) — já tratado em [providers/tiktok/pkce.ts](providers/tiktok/pkce.ts).
 
@@ -240,7 +240,6 @@ Em produção, troque `http://localhost:3000` pelo domínio HTTPS real e cadastr
 - [ ] `NEXTAUTH_SECRET` e `TOKEN_ENCRYPTION_KEY` gerados especificamente para produção
 - [ ] `MOCK_SOCIAL_APIS=false`
 - [ ] Apps da Meta e TikTok em modo **Live** (não em desenvolvimento) e com App Review aprovado para os escopos usados
-- [ ] Domínio verificado no TikTok (se usar `PULL_FROM_URL`)
 - [ ] HTTPS válido em todas as URLs de callback
 - [ ] Bucket de storage com política de acesso mínima necessária (URLs assinadas, não bucket público permanente)
 - [ ] Fluid Compute habilitado no projeto Vercel e `INNGEST_EVENT_KEY`/`INNGEST_SIGNING_KEY` configurados (integração Vercel↔Inngest ou manual)
