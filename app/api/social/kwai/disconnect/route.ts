@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { db } from '@/lib/db';
+import { deleteSocialAccount, SocialAccountHasPublicationsError } from '@/lib/social/disconnect-social-account';
 
 export async function POST(_req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -15,7 +16,15 @@ export async function POST(_req: NextRequest) {
   }
 
   // Sem chamada de revogação real (ver providers/kwai/KwaiProvider.ts) — só remove localmente.
-  await db.socialAccount.delete({ where: { id: account.id } });
+  try {
+    await deleteSocialAccount(account.id);
+  } catch (err) {
+    if (err instanceof SocialAccountHasPublicationsError) {
+      return NextResponse.json({ error: err.message }, { status: 409 });
+    }
+    throw err;
+  }
+
   await db.auditLog.create({
     data: { userId: session.user.id, action: 'social_account.disconnected', entityType: 'SocialAccount', entityId: account.id, metadata: { provider: 'KWAI' } },
   });

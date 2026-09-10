@@ -5,6 +5,7 @@ import { db } from '@/lib/db';
 import { decryptToken } from '@/lib/crypto';
 import { getSocialProvider } from '@/providers';
 import { logger } from '@/lib/logger';
+import { deleteSocialAccount, SocialAccountHasPublicationsError } from '@/lib/social/disconnect-social-account';
 
 export async function POST(_req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -24,7 +25,15 @@ export async function POST(_req: NextRequest) {
     logger.warn({ err, accountId: account.id }, 'Falha ao notificar o Facebook sobre a desconexão (prosseguindo mesmo assim)');
   }
 
-  await db.socialAccount.delete({ where: { id: account.id } });
+  try {
+    await deleteSocialAccount(account.id);
+  } catch (err) {
+    if (err instanceof SocialAccountHasPublicationsError) {
+      return NextResponse.json({ error: err.message }, { status: 409 });
+    }
+    throw err;
+  }
+
   await db.auditLog.create({
     data: { userId: session.user.id, action: 'social_account.disconnected', entityType: 'SocialAccount', entityId: account.id, metadata: { provider: 'FACEBOOK' } },
   });
