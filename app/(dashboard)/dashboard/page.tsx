@@ -42,6 +42,7 @@ export default async function DashboardPage() {
               label={PROVIDER_LABELS[provider]}
               connected={Boolean(account)}
               accountLabel={account?.username ? `@${account.username}` : account?.displayName}
+              avatarUrl={account?.avatarUrl}
               platformAvailable={platformAvailable}
               connectImplemented
             />

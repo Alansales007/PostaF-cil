@@ -43,7 +43,11 @@ export default async function AccountsSettingsPage() {
               key={provider}
               provider={provider}
               label={PROVIDER_LABELS[provider]}
-              account={account ? { username: account.username, displayName: account.displayName, status: account.status } : null}
+              account={
+                account
+                  ? { username: account.username, displayName: account.displayName, status: account.status, avatarUrl: account.avatarUrl }
+                  : null
+              }
               connectHref={implemented && platformAvailable ? `/api/social/${lower}/connect` : null}
               disconnectEndpoint={implemented ? `/api/social/${lower}/disconnect` : null}
               unavailableReason={
