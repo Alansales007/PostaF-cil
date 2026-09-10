@@ -56,13 +56,19 @@ export async function GET(req: NextRequest) {
 
     if (pages.length === 1) {
       const page = pages[0]!;
-      await upsertFacebookAccount(consumed.userId, page.id, page.name, page.category ?? null, page.access_token);
+      await upsertFacebookAccount(consumed.userId, page.id, page.name, page.category ?? null, page.access_token, page.picture?.data?.url ?? null);
       return NextResponse.redirect(new URL(`${REDIRECT_BASE}?connected=facebook`, req.url));
     }
 
     const selectionToken = createPendingPageSelection(
       consumed.userId,
-      pages.map((p) => ({ id: p.id, name: p.name, category: p.category ?? null, accessToken: p.access_token })),
+      pages.map((p) => ({
+        id: p.id,
+        name: p.name,
+        category: p.category ?? null,
+        avatarUrl: p.picture?.data?.url ?? null,
+        accessToken: p.access_token,
+      })),
     );
     const chooseUrl = new URL('/settings/accounts/facebook/choose', req.url);
     chooseUrl.searchParams.set('token', selectionToken);

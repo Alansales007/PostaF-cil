@@ -107,12 +107,13 @@ export interface FacebookPage {
   name: string;
   category?: string;
   access_token: string;
+  picture?: { data?: { url?: string } };
 }
 
 /** Páginas que o usuário administra — cada uma já vem com seu próprio access_token (não expira, salvo revogação). */
 export async function getManagedPages(userAccessToken: string): Promise<FacebookPage[]> {
   const url = new URL(`${graphBaseUrl()}/me/accounts`);
-  url.searchParams.set('fields', 'id,name,category,access_token');
+  url.searchParams.set('fields', 'id,name,category,access_token,picture');
   url.searchParams.set('access_token', userAccessToken);
 
   const res = await fetch(url.toString());

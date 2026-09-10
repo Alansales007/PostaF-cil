@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
   }
 
   const pageAccessToken = decryptSelectedPageToken(page);
-  await upsertFacebookAccount(session.user.id, page.id, page.name, page.category, pageAccessToken);
+  await upsertFacebookAccount(session.user.id, page.id, page.name, page.category, pageAccessToken, page.avatarUrl);
 
   return NextResponse.json({ ok: true });
 }

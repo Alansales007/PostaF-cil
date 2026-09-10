@@ -13,6 +13,7 @@ export async function upsertFacebookAccount(
   pageName: string | null,
   category: string | null,
   pageAccessToken: string,
+  avatarUrl: string | null = null,
 ) {
   await db.socialAccount.upsert({
     where: { userId_provider_providerAccountId: { userId, provider: 'FACEBOOK', providerAccountId: pageId } },
@@ -22,7 +23,7 @@ export async function upsertFacebookAccount(
       providerAccountId: pageId,
       username: null,
       displayName: pageName,
-      avatarUrl: null,
+      avatarUrl,
       encryptedAccessToken: encryptToken(pageAccessToken),
       encryptedRefreshToken: null,
       tokenExpiresAt: null, // token de Página derivado de token de longa duração não expira
@@ -32,6 +33,7 @@ export async function upsertFacebookAccount(
     },
     update: {
       displayName: pageName,
+      avatarUrl,
       encryptedAccessToken: encryptToken(pageAccessToken),
       status: 'ACTIVE',
     },

@@ -9,6 +9,7 @@ interface PageOption {
   id: string;
   name: string;
   category: string | null;
+  avatarUrl: string | null;
 }
 
 export function FacebookPagePicker({ token, pages }: { token: string; pages: PageOption[] }) {
@@ -43,9 +44,15 @@ export function FacebookPagePicker({ token, pages }: { token: string; pages: Pag
     <div className="space-y-3">
       {pages.map((page) => (
         <Card key={page.id} className="flex items-center justify-between gap-3 p-4">
-          <div>
-            <p className="font-medium text-slate-900 dark:text-white">{page.name}</p>
-            {page.category && <p className="text-sm text-slate-500 dark:text-slate-400">{page.category}</p>}
+          <div className="flex items-center gap-3">
+            {page.avatarUrl && (
+              // eslint-disable-next-line @next/next/no-img-element -- vem de um host externo (CDN do Facebook); next/image exigiria configurar remotePatterns, que evitamos de propósito (ver next.config.mjs)
+              <img src={page.avatarUrl} alt="" referrerPolicy="no-referrer" className="h-10 w-10 shrink-0 rounded-full object-cover" />
+            )}
+            <div>
+              <p className="font-medium text-slate-900 dark:text-white">{page.name}</p>
+              {page.category && <p className="text-sm text-slate-500 dark:text-slate-400">{page.category}</p>}
+            </div>
           </div>
           <Button size="sm" onClick={() => choose(page.id)} disabled={loadingId !== null}>
             {loadingId === page.id ? 'Conectando...' : 'Escolher esta Página'}

@@ -4,8 +4,8 @@ import { createPendingPageSelection, readPendingPageSelection, decryptSelectedPa
 describe('lib/oauth/facebook-page-selection', () => {
   it('empacota, assina e recupera a lista de Páginas com os tokens cifrados', () => {
     const token = createPendingPageSelection('user-1', [
-      { id: 'page-1', name: 'Loja A', category: 'Comércio', accessToken: 'token-pagina-a' },
-      { id: 'page-2', name: 'Loja B', category: null, accessToken: 'token-pagina-b' },
+      { id: 'page-1', name: 'Loja A', category: 'Comércio', avatarUrl: 'https://example.com/a.jpg', accessToken: 'token-pagina-a' },
+      { id: 'page-2', name: 'Loja B', category: null, avatarUrl: null, accessToken: 'token-pagina-b' },
     ]);
 
     const selection = readPendingPageSelection(token);
@@ -22,7 +22,7 @@ describe('lib/oauth/facebook-page-selection', () => {
 
   it('rejeita um token assinado adulterado', () => {
     const token = createPendingPageSelection('user-1', [
-      { id: 'page-1', name: 'Loja A', category: null, accessToken: 'token-a' },
+      { id: 'page-1', name: 'Loja A', category: null, avatarUrl: null, accessToken: 'token-a' },
     ]);
     const tampered = token.slice(0, -2) + 'xx';
     expect(readPendingPageSelection(tampered)).toBeNull();

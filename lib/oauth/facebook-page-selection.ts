@@ -7,6 +7,7 @@ export interface FacebookPageOption {
   id: string;
   name: string;
   category: string | null;
+  avatarUrl: string | null;
   /** Token de acesso da Página já cifrado (AES-256-GCM) — nunca fica em texto puro na URL. */
   encryptedAccessToken: string;
 }
@@ -24,13 +25,17 @@ interface PendingSelectionPayload {
  * (com os tokens de cada Página já cifrados) num token assinado de curta
  * duração e mandamos o usuário escolher em /settings/accounts/facebook/choose.
  */
-export function createPendingPageSelection(userId: string, pages: { id: string; name: string; category: string | null; accessToken: string }[]): string {
+export function createPendingPageSelection(
+  userId: string,
+  pages: { id: string; name: string; category: string | null; avatarUrl: string | null; accessToken: string }[],
+): string {
   const payload: PendingSelectionPayload = {
     userId,
     pages: pages.map((p) => ({
       id: p.id,
       name: p.name,
       category: p.category,
+      avatarUrl: p.avatarUrl,
       encryptedAccessToken: encryptToken(p.accessToken),
     })),
     exp: Date.now() + SELECTION_TTL_MS,
