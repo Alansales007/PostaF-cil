@@ -15,12 +15,15 @@ vi.mock('@/providers', () => ({
 
 const { getValidAccessToken } = await import('@/services/tokenService');
 
-function makeAccount(overrides: Partial<{ tokenExpiresAt: Date | null; accessToken: string }> = {}) {
+function makeAccount(
+  overrides: Partial<{ tokenExpiresAt: Date | null; accessToken: string; refreshToken: string | null }> = {},
+) {
   const accessToken = overrides.accessToken ?? 'token-atual';
   return {
     id: 'account-1',
     provider: 'INSTAGRAM',
     encryptedAccessToken: encryptToken(accessToken),
+    encryptedRefreshToken: overrides.refreshToken ? encryptToken(overrides.refreshToken) : null,
     tokenExpiresAt: overrides.tokenExpiresAt === undefined ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) : overrides.tokenExpiresAt,
     // demais campos não são lidos por getValidAccessToken
   } as unknown as SocialAccount;
@@ -61,6 +64,31 @@ describe('services/tokenService — getValidAccessToken', () => {
     expect(call.where.id).toBe('account-1');
     expect(call.data.status).toBe('ACTIVE');
     expect(call.data.encryptedAccessToken).not.toBe(account.encryptedAccessToken); // token novo, cifrado de novo
+  });
+
+  it('usa o refresh_token guardado (não o access token) quando a conta tem um — caso do TikTok', async () => {
+    refreshTokenMock.mockResolvedValue({
+      accessToken: 'access-novo',
+      refreshToken: 'refresh-novo',
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    });
+    const account = makeAccount({
+      tokenExpiresAt: new Date(Date.now() + 1000), // já quase expirando (token de 24h do TikTok)
+      accessToken: 'access-antigo',
+      refreshToken: 'refresh-antigo',
+    });
+
+    await getValidAccessToken(account);
+
+    // O bug original passava o access token pro refreshToken() do provider —
+    // o TikTok rejeita isso com "invalid access token", já que ele espera
+    // o refresh_token de verdade nesse endpoint.
+    expect(refreshTokenMock).toHaveBeenCalledWith('refresh-antigo');
+
+    // O TikTok reemite um novo refresh_token a cada renovação — precisa
+    // persistir, senão a próxima renovação usa um valor já invalidado.
+    const call = updateMock.mock.calls[0]![0] as { data: { encryptedRefreshToken?: string } };
+    expect(call.data.encryptedRefreshToken).toBeDefined();
   });
 
   it('se a renovação falhar, mantém o token atual utilizável e marca a conta como ERROR', async () => {

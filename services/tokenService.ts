@@ -30,12 +30,22 @@ export async function getValidAccessToken(account: SocialAccount): Promise<Valid
 
   try {
     const provider = getSocialProvider(account.provider as SocialProviderId);
-    const refreshed = await provider.refreshToken(currentToken);
+    // Instagram/Facebook não têm refresh_token separado — o próprio access
+    // token de longa duração se renova nele mesmo (ver nota das classes).
+    // TikTok é o único dos três com um refresh_token de verdade (365 dias);
+    // passar o access token pra ele resulta em "invalid access token" — por
+    // isso usamos encryptedRefreshToken quando ele existe.
+    const tokenForRefresh = account.encryptedRefreshToken ? decryptToken(account.encryptedRefreshToken) : currentToken;
+    const refreshed = await provider.refreshToken(tokenForRefresh);
 
     await db.socialAccount.update({
       where: { id: account.id },
       data: {
         encryptedAccessToken: encryptToken(refreshed.accessToken),
+        // O TikTok reemite um novo refresh_token a cada renovação — sem
+        // persistir isso aqui, a próxima renovação usaria um valor já
+        // invalidado e falharia do mesmo jeito.
+        ...(refreshed.refreshToken ? { encryptedRefreshToken: encryptToken(refreshed.refreshToken) } : {}),
         tokenExpiresAt: refreshed.expiresAt,
         status: 'ACTIVE',
       },
