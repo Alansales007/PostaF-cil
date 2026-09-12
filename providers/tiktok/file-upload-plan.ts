@@ -12,10 +12,15 @@
  * `video_size / chunk_size` arredondado para baixo (o restante da divisão
  * é absorvido pelo último chunk, nunca vira um chunk extra); mínimo 1,
  * máximo 1000 chunks; tamanho total do vídeo até 4GB.
+ *
+ * "MB" aqui é megabyte decimal (1.000.000 bytes), não mebibyte binário
+ * (1.048.576 bytes) — a documentação não deixa isso explícito, mas um
+ * chunk_size de 64 * 1024 * 1024 (67.108.864 bytes) foi recusado pela API
+ * de verdade com "The chunk size is invalid"; 64.000.000 funciona.
  */
-export const MIN_CHUNK_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
-export const MAX_CHUNK_SIZE_BYTES = 64 * 1024 * 1024; // 64MB
-export const MAX_FINAL_CHUNK_SIZE_BYTES = 128 * 1024 * 1024; // 128MB
+export const MIN_CHUNK_SIZE_BYTES = 5_000_000; // 5MB decimais
+export const MAX_CHUNK_SIZE_BYTES = 64_000_000; // 64MB decimais
+export const MAX_FINAL_CHUNK_SIZE_BYTES = 128_000_000; // 128MB decimais
 
 export interface FileUploadChunkPlan {
   chunkSizeBytes: number;
